@@ -167,6 +167,71 @@ export async function getTemplateLists(): Promise<List[]> {
   return data || [];
 }
 
+export interface FeaturedList {
+  id: string;
+  list_id: string;
+  featured_at: string;
+  title: string;
+  description?: string;
+  item_count: number;
+  ranking_count: number;
+  creator_name?: string;
+}
+
+export async function getFeaturedLists(): Promise<FeaturedList[]> {
+  const { data, error } = await supabase
+    .from('featured_lists')
+    .select(`
+      id,
+      list_id,
+      featured_at,
+      lists (
+        id,
+        title,
+        description,
+        creator_id
+      )
+    `)
+    .order('featured_at', { ascending: false })
+    .limit(20);
+
+  if (error) {
+    console.log('Featured lists not available:', error.message);
+    return [];
+  }
+
+  // Transform the data
+  const featured: FeaturedList[] = [];
+  for (const item of data || []) {
+    const list = item.lists as any;
+    if (!list) continue;
+
+    // Get item count
+    const { count: itemCount } = await supabase
+      .from('list_items')
+      .select('id', { count: 'exact', head: true })
+      .eq('list_id', list.id);
+
+    // Get ranking count
+    const { count: rankingCount } = await supabase
+      .from('rankings')
+      .select('id', { count: 'exact', head: true })
+      .eq('list_id', list.id);
+
+    featured.push({
+      id: item.id,
+      list_id: list.id,
+      featured_at: item.featured_at,
+      title: list.title,
+      description: list.description,
+      item_count: itemCount || 0,
+      ranking_count: rankingCount || 0,
+    });
+  }
+
+  return featured;
+}
+
 export async function deleteList(id: string): Promise<void> {
   const { error } = await supabase
     .from('lists')

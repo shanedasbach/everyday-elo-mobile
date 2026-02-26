@@ -18,12 +18,12 @@
 | **Bulk add items** | ✅ | ✅ | - |
 | **Save & Exit ranking** | ✅ | ✅ | - |
 | **Skip comparison** | ✅ | ✅ | - |
-| **Add items after ranking** | ✅ | ❌ | 🟠 Medium |
-| **Express mode** | ✅ | ❌ | 🟢 Low |
+| **Add items after ranking** | ✅ | ✅ | - |
+| **Express mode** | ✅ | ✅ | - |
 | **Forgot password** | ✅ | ✅ | - |
-| **Reset password** | ✅ | ❌ | 🟠 Medium |
-| **Featured lists (API)** | ✅ | ❌ | 🟢 Low |
-| **Item actions (boost/remove)** | ✅ | ❌ | 🟢 Low |
+| **Reset password** | ✅ | ⏳ | 🟢 Low (needs deep link) |
+| **Featured lists (API)** | ✅ | ✅ | - |
+| **Item actions (boost/remove)** | ✅ | ✅ | - |
 
 ---
 

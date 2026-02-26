@@ -1,9 +1,12 @@
 import { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, ScrollView, Alert } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { expectedScore, K_FACTOR } from '../../lib/elo';
 import { useAuth } from '../../lib/auth-context';
+import { supabase } from '../../lib/supabase';
+import AddItemModal from '../../components/AddItemModal';
+import ItemActionMenu, { ItemAction } from '../../components/ItemActionMenu';
 import { 
   getList, 
   getListByShareCode, 
@@ -14,6 +17,8 @@ import {
   incrementComparisonsCount,
   markRankingComplete,
   recordComparison,
+  addListItem,
+  deleteListItem,
   List,
   ListItem,
   RankedItem,
@@ -69,12 +74,21 @@ export default function RankScreen() {
   
   const [loading, setLoading] = useState(true);
   const [listTitle, setListTitle] = useState('');
+  const [listId, setListId] = useState<string | null>(null);
   const [rankingId, setRankingId] = useState<string | null>(null);
   const [rankedItems, setRankedItems] = useState<LocalRankedItem[]>([]);
   const [currentPair, setCurrentPair] = useState<[number, number] | null>(null);
   const [comparisons, setComparisons] = useState(0);
   const [isComplete, setIsComplete] = useState(false);
   const [useOfflineMode, setUseOfflineMode] = useState(false);
+  
+  // Item management state
+  const [showAddItem, setShowAddItem] = useState(false);
+  const [showItemMenu, setShowItemMenu] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<{ item: LocalRankedItem; rank: number } | null>(null);
+  
+  // Express mode - auto-skip obvious matchups
+  const [expressMode, setExpressMode] = useState(false);
 
   useEffect(() => {
     loadList();
@@ -115,6 +129,7 @@ export default function RankScreen() {
       }
 
       setListTitle(list.title);
+      setListId(list.id);
 
       // Get or create ranking
       const ranking = await createRanking(list.id, user?.id);
@@ -153,7 +168,7 @@ export default function RankScreen() {
     }
   };
 
-  const selectNextPair = (items: LocalRankedItem[]) => {
+  const selectNextPair = (items: LocalRankedItem[], skipObvious: boolean = false) => {
     if (items.length < 2) return;
 
     // Sort by comparisons (prioritize less-compared items)
@@ -161,7 +176,15 @@ export default function RankScreen() {
       .sort((a, b) => a.comparisons - b.comparisons);
     
     const first = sorted[0];
-    const others = sorted.filter((_, i) => i !== 0);
+    let others = sorted.filter((_, i) => i !== 0);
+    
+    // Express mode: filter out very lopsided matchups (rating diff > 200)
+    if (skipObvious && others.length > 1) {
+      const closeOthers = others.filter(o => Math.abs(o.rating - first.rating) < 200);
+      if (closeOthers.length > 0) {
+        others = closeOthers;
+      }
+    }
     
     // Pick opponent with similar rating
     others.sort((a, b) => 
@@ -233,7 +256,7 @@ export default function RankScreen() {
         }
       }
     } else {
-      selectNextPair(newItems);
+      selectNextPair(newItems, expressMode);
     }
   };
 
@@ -258,6 +281,131 @@ export default function RankScreen() {
     );
   }
 
+  const handleAddItem = async (name: string) => {
+    if (useOfflineMode || !listId || !rankingId) {
+      Alert.alert('Not Available', 'Adding items is only available for saved lists');
+      return;
+    }
+
+    try {
+      // Add to list
+      const newItem = await addListItem(listId, name);
+      
+      // Add to ranking with starting rating
+      const { data: rankedItem } = await supabase
+        .from('ranked_items')
+        .insert({
+          ranking_id: rankingId,
+          item_id: newItem.id,
+          rating: 1500,
+          comparisons: 0,
+        })
+        .select()
+        .single();
+
+      if (rankedItem) {
+        // Add to local state
+        const newRankedItem: LocalRankedItem = {
+          id: rankedItem.id,
+          itemId: newItem.id,
+          name: name,
+          rating: 1500,
+          comparisons: 0,
+        };
+        
+        setRankedItems([...rankedItems, newRankedItem]);
+        
+        // Mark as incomplete so user can rank the new item
+        setIsComplete(false);
+        await supabase
+          .from('rankings')
+          .update({ is_complete: false })
+          .eq('id', rankingId);
+        
+        // Start ranking the new item
+        selectNextPair([...rankedItems, newRankedItem]);
+        
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } catch (error) {
+      console.error('Failed to add item:', error);
+      Alert.alert('Error', 'Failed to add item');
+    }
+  };
+
+  const handleItemAction = async (action: ItemAction) => {
+    if (!selectedItem || useOfflineMode) return;
+
+    const sorted = [...rankedItems].sort((a, b) => b.rating - a.rating);
+    const { item, rank } = selectedItem;
+
+    try {
+      if (action === 'boost') {
+        // Set rating higher than the current #1
+        const topRating = sorted[0]?.rating || 1500;
+        const newRating = topRating + 100;
+        
+        await updateRankedItem(item.id, newRating, item.comparisons);
+        
+        const newItems = rankedItems.map(ri => 
+          ri.id === item.id ? { ...ri, rating: newRating } : ri
+        );
+        setRankedItems(newItems);
+        
+      } else if (action === 'demote') {
+        // Set rating lower than the current last
+        const bottomRating = sorted[sorted.length - 1]?.rating || 1500;
+        const newRating = bottomRating - 100;
+        
+        await updateRankedItem(item.id, newRating, item.comparisons);
+        
+        const newItems = rankedItems.map(ri => 
+          ri.id === item.id ? { ...ri, rating: newRating } : ri
+        );
+        setRankedItems(newItems);
+        
+      } else if (action === 'remove') {
+        Alert.alert(
+          'Remove Item',
+          `Are you sure you want to remove "${item.name}"?`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Remove',
+              style: 'destructive',
+              onPress: async () => {
+                try {
+                  // Delete ranked item
+                  await supabase
+                    .from('ranked_items')
+                    .delete()
+                    .eq('id', item.id);
+                  
+                  // Delete list item
+                  await deleteListItem(item.itemId);
+                  
+                  // Update local state
+                  setRankedItems(rankedItems.filter(ri => ri.id !== item.id));
+                  
+                  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                } catch (error) {
+                  console.error('Failed to remove item:', error);
+                  Alert.alert('Error', 'Failed to remove item');
+                }
+              },
+            },
+          ]
+        );
+        return;
+      }
+
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      console.error('Failed to perform action:', error);
+      Alert.alert('Error', 'Failed to perform action');
+    }
+  };
+
   if (isComplete) {
     const sorted = [...rankedItems].sort((a, b) => b.rating - a.rating);
     return (
@@ -267,7 +415,12 @@ export default function RankScreen() {
             <Text style={styles.backButtonText}>← Back</Text>
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
-          <View style={{ width: 60 }} />
+          {!useOfflineMode && (
+            <TouchableOpacity onPress={() => setShowAddItem(true)} style={styles.addItemButton}>
+              <Text style={styles.addItemText}>+ Add</Text>
+            </TouchableOpacity>
+          )}
+          {useOfflineMode && <View style={{ width: 60 }} />}
         </View>
         
         <View style={styles.resultsHeader}>
@@ -282,8 +435,11 @@ export default function RankScreen() {
               style={styles.resultItem}
               activeOpacity={0.7}
               onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                // TODO: Navigate to item detail view
+                if (!useOfflineMode) {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setSelectedItem({ item, rank: index + 1 });
+                  setShowItemMenu(true);
+                }
               }}
             >
               <View style={[styles.rankBadge, index === 0 && styles.goldBadge, index === 1 && styles.silverBadge, index === 2 && styles.bronzeBadge]}>
@@ -294,6 +450,27 @@ export default function RankScreen() {
             </TouchableOpacity>
           ))}
         </ScrollView>
+
+        <AddItemModal
+          visible={showAddItem}
+          onClose={() => setShowAddItem(false)}
+          onAdd={handleAddItem}
+          existingItems={rankedItems.map(ri => ri.name)}
+        />
+
+        {selectedItem && (
+          <ItemActionMenu
+            visible={showItemMenu}
+            onClose={() => {
+              setShowItemMenu(false);
+              setSelectedItem(null);
+            }}
+            itemName={selectedItem.item.name}
+            itemRank={selectedItem.rank}
+            totalItems={rankedItems.length}
+            onAction={handleItemAction}
+          />
+        )}
       </SafeAreaView>
     );
   }
@@ -324,7 +501,12 @@ export default function RankScreen() {
   const handleSkip = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     // Select a new pair without recording anything
-    selectNextPair(rankedItems);
+    selectNextPair(rankedItems, expressMode);
+  };
+  
+  const toggleExpressMode = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setExpressMode(!expressMode);
   };
 
   return (
@@ -344,7 +526,12 @@ export default function RankScreen() {
       </View>
 
       <View style={styles.progressContainer}>
-        <Text style={styles.progressText}>{comparisons} comparisons • ~{Math.max(0, estimated - comparisons)} left</Text>
+        <View style={styles.progressHeader}>
+          <Text style={styles.progressText}>{comparisons} comparisons • ~{Math.max(0, estimated - comparisons)} left</Text>
+          <TouchableOpacity onPress={toggleExpressMode} style={[styles.expressBadge, expressMode && styles.expressBadgeActive]}>
+            <Text style={[styles.expressBadgeText, expressMode && styles.expressBadgeTextActive]}>⚡ Express {expressMode ? 'ON' : 'OFF'}</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.progressBar}>
           <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
         </View>
@@ -411,6 +598,15 @@ const styles = StyleSheet.create({
     color: '#3B82F6',
     fontWeight: '500',
   },
+  addItemButton: {
+    paddingVertical: 4,
+    paddingLeft: 8,
+  },
+  addItemText: {
+    fontSize: 14,
+    color: '#3B82F6',
+    fontWeight: '600',
+  },
   title: {
     fontSize: 18,
     fontWeight: '600',
@@ -423,10 +619,35 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     marginBottom: 24,
   },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
   progressText: {
     fontSize: 12,
     color: '#6B7280',
-    marginBottom: 8,
+  },
+  expressBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  expressBadgeActive: {
+    backgroundColor: '#FEF3C7',
+    borderColor: '#FCD34D',
+  },
+  expressBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#6B7280',
+  },
+  expressBadgeTextActive: {
+    color: '#B45309',
   },
   progressBar: {
     height: 4,

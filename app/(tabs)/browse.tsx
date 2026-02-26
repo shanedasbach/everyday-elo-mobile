@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, RefreshControl, ActivityIndicator } from 'react-native';
 import { Link } from 'expo-router';
-import { getTemplateLists, List } from '../../lib/api';
+import { getTemplateLists, getFeaturedLists, FeaturedList, List } from '../../lib/api';
 
 // Simple template type that works for both API and offline data
 interface Template {
@@ -25,18 +25,23 @@ const fallbackTemplates: Template[] = [
 
 export default function BrowseScreen() {
   const [templates, setTemplates] = useState<Template[]>(fallbackTemplates);
+  const [featuredLists, setFeaturedLists] = useState<FeaturedList[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const loadTemplates = async () => {
+  const loadData = async () => {
     try {
+      // Load templates
       const supabaseTemplates = await getTemplateLists();
       if (supabaseTemplates.length > 0) {
         setTemplates(supabaseTemplates as Template[]);
       }
+      
+      // Load featured lists
+      const featured = await getFeaturedLists();
+      setFeaturedLists(featured);
     } catch (error) {
-      console.log('Using offline templates');
-      // Keep fallback templates
+      console.log('Using offline data');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -44,13 +49,25 @@ export default function BrowseScreen() {
   };
 
   useEffect(() => {
-    loadTemplates();
+    loadData();
   }, []);
 
   const onRefresh = () => {
     setRefreshing(true);
-    loadTemplates();
+    loadData();
   };
+
+  // Group featured lists by hour
+  const groupedFeatured = featuredLists.reduce((acc, list) => {
+    const hour = new Date(list.featured_at).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+    });
+    if (!acc[hour]) acc[hour] = [];
+    acc[hour].push(list);
+    return acc;
+  }, {} as Record<string, FeaturedList[]>);
 
   return (
     <ScrollView 
@@ -59,41 +76,84 @@ export default function BrowseScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
       }
     >
-      <Text style={styles.sectionTitle}>Popular Templates</Text>
-      <Text style={styles.sectionSubtitle}>Quick start with curated lists</Text>
-      
       {loading ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator color="#3B82F6" />
+          <ActivityIndicator color="#3B82F6" size="large" />
         </View>
       ) : (
-        templates.map((template) => (
-          <Link 
-            key={template.id} 
-            href={`/rank/${template.share_code || template.id}`} 
-            asChild
-          >
-            <TouchableOpacity style={styles.card}>
-              <Text style={styles.cardTitle}>{template.title}</Text>
-              {template.description && (
-                <Text style={styles.cardDescription}>{template.description}</Text>
-              )}
-            </TouchableOpacity>
-          </Link>
-        ))
+        <>
+          {/* Featured Lists Section */}
+          {featuredLists.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>🔥 Featured Lists</Text>
+              <Text style={styles.sectionSubtitle}>Fresh community picks</Text>
+              
+              {Object.entries(groupedFeatured).slice(0, 2).map(([hour, lists]) => (
+                <View key={hour} style={styles.featuredGroup}>
+                  <Text style={styles.featuredTime}>✨ Featured {hour}</Text>
+                  {lists.map(list => (
+                    <Link 
+                      key={list.id} 
+                      href={`/rank/${list.list_id}`} 
+                      asChild
+                    >
+                      <TouchableOpacity style={styles.featuredCard}>
+                        <Text style={styles.featuredTitle}>{list.title}</Text>
+                        {list.description && (
+                          <Text style={styles.featuredDescription} numberOfLines={2}>
+                            {list.description}
+                          </Text>
+                        )}
+                        <View style={styles.featuredMeta}>
+                          <Text style={styles.featuredStat}>📝 {list.item_count} items</Text>
+                          <Text style={styles.featuredStat}>👥 {list.ranking_count} ranked</Text>
+                        </View>
+                        {list.creator_name && (
+                          <Text style={styles.featuredCreator}>by {list.creator_name}</Text>
+                        )}
+                      </TouchableOpacity>
+                    </Link>
+                  ))}
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Templates Section */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>📋 Templates</Text>
+            <Text style={styles.sectionSubtitle}>Quick start with curated lists</Text>
+            
+            {templates.map((template) => (
+              <Link 
+                key={template.id} 
+                href={`/rank/${template.share_code || template.id}`} 
+                asChild
+              >
+                <TouchableOpacity style={styles.card}>
+                  <Text style={styles.cardTitle}>{template.title}</Text>
+                  {template.description && (
+                    <Text style={styles.cardDescription}>{template.description}</Text>
+                  )}
+                </TouchableOpacity>
+              </Link>
+            ))}
+          </View>
+          
+          {/* Create CTA */}
+          <View style={styles.createCard}>
+            <Text style={styles.createTitle}>Create your own list</Text>
+            <Text style={styles.createText}>Add your items, rank them, and share with friends</Text>
+            <Link href="/(tabs)/create" asChild>
+              <TouchableOpacity style={styles.createButton}>
+                <Text style={styles.createButtonText}>+ New List</Text>
+              </TouchableOpacity>
+            </Link>
+          </View>
+          
+          <View style={styles.spacer} />
+        </>
       )}
-      
-      <View style={styles.createCard}>
-        <Text style={styles.createTitle}>Create your own list</Text>
-        <Text style={styles.createText}>Add your items, rank them, and share with friends</Text>
-        <Link href="/(tabs)/create" asChild>
-          <TouchableOpacity style={styles.createButton}>
-            <Text style={styles.createButtonText}>+ New List</Text>
-          </TouchableOpacity>
-        </Link>
-      </View>
-      
-      <View style={styles.spacer} />
     </ScrollView>
   );
 }
@@ -102,6 +162,13 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F9FAFB',
+  },
+  loadingContainer: {
+    padding: 64,
+    alignItems: 'center',
+  },
+  section: {
+    marginBottom: 8,
   },
   sectionTitle: {
     fontSize: 20,
@@ -117,9 +184,56 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     marginBottom: 16,
   },
-  loadingContainer: {
-    padding: 32,
-    alignItems: 'center',
+  featuredGroup: {
+    marginBottom: 16,
+  },
+  featuredTime: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#9CA3AF',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  featuredCard: {
+    backgroundColor: '#fff',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  featuredTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111827',
+    marginBottom: 4,
+  },
+  featuredDescription: {
+    fontSize: 14,
+    color: '#6B7280',
+    marginBottom: 8,
+  },
+  featuredMeta: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  featuredStat: {
+    fontSize: 12,
+    color: '#9CA3AF',
+  },
+  featuredCreator: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
   },
   card: {
     backgroundColor: '#fff',
@@ -146,7 +260,7 @@ const styles = StyleSheet.create({
   createCard: {
     backgroundColor: '#3B82F6',
     marginHorizontal: 16,
-    marginTop: 24,
+    marginTop: 16,
     borderRadius: 16,
     padding: 24,
     alignItems: 'center',
