@@ -1,10 +1,25 @@
 import { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { expectedScore, K_FACTOR } from '../../lib/elo';
+import { useAuth } from '../../lib/auth-context';
+import { 
+  getList, 
+  getListByShareCode, 
+  getListItems, 
+  createRanking, 
+  getRankedItems,
+  updateRankedItem,
+  incrementComparisonsCount,
+  markRankingComplete,
+  recordComparison,
+  List,
+  ListItem,
+  RankedItem,
+} from '../../lib/api';
 
-// Template data (same as browse screen)
+// Template data for offline/demo use
 const templateData: Record<string, { title: string; items: string[] }> = {
   movies: {
     title: 'Top 10 Movies of All Time',
@@ -40,7 +55,9 @@ const templateData: Record<string, { title: string; items: string[] }> = {
   },
 };
 
-interface RankedItem {
+interface LocalRankedItem {
+  id: string;
+  itemId: string;
   name: string;
   rating: number;
   comparisons: number;
@@ -48,28 +65,99 @@ interface RankedItem {
 
 export default function RankScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const template = templateData[id || ''];
+  const { user } = useAuth();
   
-  const [rankedItems, setRankedItems] = useState<RankedItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [listTitle, setListTitle] = useState('');
+  const [rankingId, setRankingId] = useState<string | null>(null);
+  const [rankedItems, setRankedItems] = useState<LocalRankedItem[]>([]);
   const [currentPair, setCurrentPair] = useState<[number, number] | null>(null);
   const [comparisons, setComparisons] = useState(0);
   const [isComplete, setIsComplete] = useState(false);
+  const [useOfflineMode, setUseOfflineMode] = useState(false);
 
   useEffect(() => {
+    loadList();
+  }, [id]);
+
+  const loadList = async () => {
+    if (!id) return;
+
+    // Check if it's a template code
+    const template = templateData[id];
     if (template) {
-      const items = template.items.map((name) => ({
+      // Use offline mode for templates
+      setUseOfflineMode(true);
+      setListTitle(template.title);
+      const items = template.items.map((name, index) => ({
+        id: `local-${index}`,
+        itemId: `local-${index}`,
         name,
         rating: 1500,
         comparisons: 0,
       }));
       setRankedItems(items);
       selectNextPair(items);
+      setLoading(false);
+      return;
     }
-  }, [template]);
 
-  const selectNextPair = (items: RankedItem[]) => {
+    // Try to load from Supabase
+    try {
+      let list = await getList(id);
+      if (!list) {
+        list = await getListByShareCode(id);
+      }
+
+      if (!list) {
+        setLoading(false);
+        return;
+      }
+
+      setListTitle(list.title);
+
+      // Get or create ranking
+      const ranking = await createRanking(list.id, user?.id);
+      setRankingId(ranking.id);
+      setComparisons(ranking.comparisons_count);
+
+      if (ranking.is_complete) {
+        setIsComplete(true);
+      }
+
+      // Get list items and ranked items
+      const listItems = await getListItems(list.id);
+      const rankedItemsData = await getRankedItems(ranking.id);
+
+      // Map ranked items with names
+      const items: LocalRankedItem[] = rankedItemsData.map(ri => {
+        const listItem = listItems.find(li => li.id === ri.item_id);
+        return {
+          id: ri.id,
+          itemId: ri.item_id,
+          name: listItem?.name || 'Unknown',
+          rating: ri.rating,
+          comparisons: ri.comparisons,
+        };
+      });
+
+      setRankedItems(items);
+      
+      if (!ranking.is_complete) {
+        selectNextPair(items);
+      }
+    } catch (error) {
+      console.error('Failed to load list:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const selectNextPair = (items: LocalRankedItem[]) => {
+    if (items.length < 2) return;
+
     // Sort by comparisons (prioritize less-compared items)
-    const sorted = [...items].map((item, index) => ({ ...item, index }))
+    const sorted = [...items].map((item, index) => ({ ...item, originalIndex: index }))
       .sort((a, b) => a.comparisons - b.comparisons);
     
     const first = sorted[0];
@@ -86,13 +174,13 @@ export default function RankScreen() {
     
     // Randomize order
     if (Math.random() > 0.5) {
-      setCurrentPair([first.index, second.index]);
+      setCurrentPair([first.originalIndex, second.originalIndex]);
     } else {
-      setCurrentPair([second.index, first.index]);
+      setCurrentPair([second.originalIndex, first.originalIndex]);
     }
   };
 
-  const handleChoice = (winnerIdx: number, loserIdx: number) => {
+  const handleChoice = async (winnerIdx: number, loserIdx: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     
     const winner = rankedItems[winnerIdx];
@@ -101,31 +189,65 @@ export default function RankScreen() {
     const expectedWinner = expectedScore(winner.rating, loser.rating);
     const expectedLoser = expectedScore(loser.rating, winner.rating);
     
+    const newWinnerRating = Math.round(winner.rating + K_FACTOR * (1 - expectedWinner));
+    const newLoserRating = Math.round(loser.rating + K_FACTOR * (0 - expectedLoser));
+
+    // Update state
     const newItems = [...rankedItems];
     newItems[winnerIdx] = {
       ...winner,
-      rating: Math.round(winner.rating + K_FACTOR * (1 - expectedWinner)),
+      rating: newWinnerRating,
       comparisons: winner.comparisons + 1,
     };
     newItems[loserIdx] = {
       ...loser,
-      rating: Math.round(loser.rating + K_FACTOR * (0 - expectedLoser)),
+      rating: newLoserRating,
       comparisons: loser.comparisons + 1,
     };
     
     setRankedItems(newItems);
     setComparisons(comparisons + 1);
+
+    // Update Supabase if online
+    if (!useOfflineMode && rankingId) {
+      try {
+        await updateRankedItem(winner.id, newWinnerRating, winner.comparisons + 1);
+        await updateRankedItem(loser.id, newLoserRating, loser.comparisons + 1);
+        await incrementComparisonsCount(rankingId);
+        await recordComparison(rankingId, winner.itemId, loser.itemId, winner.itemId);
+      } catch (error) {
+        console.error('Failed to save comparison:', error);
+      }
+    }
     
-    // Check if complete (all items compared at least twice)
+    // Check if complete
     if (newItems.every((item) => item.comparisons >= 2)) {
       setIsComplete(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      
+      if (!useOfflineMode && rankingId) {
+        try {
+          await markRankingComplete(rankingId);
+        } catch (error) {
+          console.error('Failed to mark complete:', error);
+        }
+      }
     } else {
       selectNextPair(newItems);
     }
   };
 
-  if (!template) {
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#3B82F6" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!listTitle) {
     return (
       <SafeAreaView style={styles.container}>
         <Text style={styles.errorText}>List not found</Text>
@@ -142,12 +264,12 @@ export default function RankScreen() {
       <SafeAreaView style={styles.container}>
         <View style={styles.resultsHeader}>
           <Text style={styles.resultsTitle}>🏆 Your Rankings</Text>
-          <Text style={styles.resultsSubtitle}>{template.title}</Text>
+          <Text style={styles.resultsSubtitle}>{listTitle}</Text>
         </View>
         
         <View style={styles.resultsList}>
           {sorted.map((item, index) => (
-            <View key={item.name} style={styles.resultItem}>
+            <View key={item.id} style={styles.resultItem}>
               <Text style={styles.resultRank}>#{index + 1}</Text>
               <Text style={styles.resultName}>{item.name}</Text>
               <Text style={styles.resultRating}>{item.rating}</Text>
@@ -165,7 +287,9 @@ export default function RankScreen() {
   if (!currentPair) {
     return (
       <SafeAreaView style={styles.container}>
-        <Text>Loading...</Text>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#3B82F6" />
+        </View>
       </SafeAreaView>
     );
   }
@@ -182,12 +306,12 @@ export default function RankScreen() {
         <TouchableOpacity onPress={() => router.back()}>
           <Text style={styles.closeButton}>✕</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>{template.title}</Text>
+        <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
         <View style={{ width: 24 }} />
       </View>
 
       <View style={styles.progressContainer}>
-        <Text style={styles.progressText}>{comparisons} comparisons • ~{estimated - comparisons} left</Text>
+        <Text style={styles.progressText}>{comparisons} comparisons • ~{Math.max(0, estimated - comparisons)} left</Text>
         <View style={styles.progressBar}>
           <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
         </View>
@@ -225,6 +349,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#F9FAFB',
   },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -240,6 +369,9 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: '#111827',
+    flex: 1,
+    textAlign: 'center',
+    marginHorizontal: 8,
   },
   progressContainer: {
     paddingHorizontal: 16,

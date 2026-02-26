@@ -1,11 +1,15 @@
 import { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Alert, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
+import { createList, addListItems } from '../../lib/api';
+import { useAuth } from '../../lib/auth-context';
 
 export default function CreateScreen() {
+  const { user } = useAuth();
   const [title, setTitle] = useState('');
   const [items, setItems] = useState<string[]>([]);
   const [newItem, setNewItem] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const addItem = () => {
     const trimmed = newItem.trim();
@@ -22,7 +26,7 @@ export default function CreateScreen() {
     setItems(items.filter((_, i) => i !== index));
   };
 
-  const startRanking = () => {
+  const startRanking = async () => {
     if (!title.trim()) {
       Alert.alert('Missing Title', 'Please enter a title');
       return;
@@ -31,9 +35,54 @@ export default function CreateScreen() {
       Alert.alert('Need More Items', 'Add at least 2 items to start ranking');
       return;
     }
-    // TODO: Create list in Supabase and navigate
-    // For now, just show success
-    Alert.alert('Coming Soon', 'List creation will be connected to the backend');
+
+    setLoading(true);
+    try {
+      // Create the list
+      const list = await createList({ title: title.trim() });
+      
+      // Add items
+      await addListItems(list.id, items);
+      
+      // Navigate to ranking
+      router.replace(`/rank/${list.id}`);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to create list');
+      setLoading(false);
+    }
+  };
+
+  const saveForLater = async () => {
+    if (!user) {
+      Alert.alert('Sign In Required', 'Please sign in to save lists');
+      return;
+    }
+    if (!title.trim()) {
+      Alert.alert('Missing Title', 'Please enter a title');
+      return;
+    }
+    if (items.length < 2) {
+      Alert.alert('Need More Items', 'Add at least 2 items to save');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const list = await createList({ title: title.trim() });
+      await addListItems(list.id, items);
+      
+      Alert.alert('Saved!', 'List saved to My Lists', [
+        { text: 'OK', onPress: () => {
+          setTitle('');
+          setItems([]);
+          router.push('/(tabs)/my-lists');
+        }}
+      ]);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to save list');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -46,6 +95,7 @@ export default function CreateScreen() {
           onChangeText={setTitle}
           placeholder="e.g., Best Pizza Toppings"
           placeholderTextColor="#9CA3AF"
+          editable={!loading}
         />
 
         <Text style={styles.label}>Add Items</Text>
@@ -58,11 +108,12 @@ export default function CreateScreen() {
             placeholderTextColor="#9CA3AF"
             onSubmitEditing={addItem}
             returnKeyType="done"
+            editable={!loading}
           />
           <TouchableOpacity 
-            style={[styles.addButton, !newItem.trim() && styles.addButtonDisabled]} 
+            style={[styles.addButton, (!newItem.trim() || loading) && styles.addButtonDisabled]} 
             onPress={addItem}
-            disabled={!newItem.trim()}
+            disabled={!newItem.trim() || loading}
           >
             <Text style={styles.addButtonText}>Add</Text>
           </TouchableOpacity>
@@ -74,8 +125,8 @@ export default function CreateScreen() {
             {items.map((item, index) => (
               <View key={index} style={styles.item}>
                 <Text style={styles.itemText}>{item}</Text>
-                <TouchableOpacity onPress={() => removeItem(index)}>
-                  <Text style={styles.removeButton}>✕</Text>
+                <TouchableOpacity onPress={() => removeItem(index)} disabled={loading}>
+                  <Text style={[styles.removeButton, loading && styles.removeButtonDisabled]}>✕</Text>
                 </TouchableOpacity>
               </View>
             ))}
@@ -92,15 +143,37 @@ export default function CreateScreen() {
         <TouchableOpacity
           style={[
             styles.startButton,
-            (items.length < 2 || !title.trim()) && styles.startButtonDisabled,
+            (items.length < 2 || !title.trim() || loading) && styles.startButtonDisabled,
           ]}
           onPress={startRanking}
-          disabled={items.length < 2 || !title.trim()}
+          disabled={items.length < 2 || !title.trim() || loading}
         >
-          <Text style={styles.startButtonText}>
-            Start Ranking {items.length >= 2 ? `(${items.length} items)` : ''}
-          </Text>
+          {loading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.startButtonText}>
+              Start Ranking {items.length >= 2 ? `(${items.length} items)` : ''}
+            </Text>
+          )}
         </TouchableOpacity>
+
+        {user && (
+          <TouchableOpacity
+            style={[
+              styles.saveButton,
+              (items.length < 2 || !title.trim() || loading) && styles.saveButtonDisabled,
+            ]}
+            onPress={saveForLater}
+            disabled={items.length < 2 || !title.trim() || loading}
+          >
+            <Text style={[
+              styles.saveButtonText,
+              (items.length < 2 || !title.trim() || loading) && styles.saveButtonTextDisabled,
+            ]}>
+              Save for Later
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     </ScrollView>
   );
@@ -182,6 +255,9 @@ const styles = StyleSheet.create({
     color: '#9CA3AF',
     padding: 4,
   },
+  removeButtonDisabled: {
+    opacity: 0.5,
+  },
   emptyState: {
     alignItems: 'center',
     paddingVertical: 48,
@@ -214,5 +290,25 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
     fontSize: 16,
+  },
+  saveButton: {
+    backgroundColor: '#fff',
+    padding: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  saveButtonDisabled: {
+    backgroundColor: '#F9FAFB',
+  },
+  saveButtonText: {
+    color: '#374151',
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  saveButtonTextDisabled: {
+    color: '#9CA3AF',
   },
 });
