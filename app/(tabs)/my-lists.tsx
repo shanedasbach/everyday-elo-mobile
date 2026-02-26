@@ -153,7 +153,7 @@ export default function MyListsScreen() {
                 </View>
               )}
 
-              <Link href={`/rank/${list.id}`} asChild>
+              <Link href={`/list/${list.id}`} asChild>
                 <TouchableOpacity style={styles.actionButton}>
                   <Text style={styles.actionButtonText}>{statusConfig.action}</Text>
                 </TouchableOpacity>
