@@ -6,11 +6,11 @@ Prioritized list of features and bugs, ordered by functionality and user impact.
 
 ---
 
-## Phase 1: Core Navigation & Structure
+## Phase 1: Core Navigation & Structure ✅
 
-### 1. Home / Landing Page
+### 1. Home / Landing Page ✅
 **Issue:** #3 | **Doc:** [003-home-landing-page.md](bugs/003-home-landing-page.md)  
-**Priority:** 🔴 Critical
+**Priority:** 🔴 Critical | **Status:** Done (commit d5bb5ce)
 
 The app needs a proper entry point with clear navigation to main features:
 - Browse lists
@@ -22,26 +22,23 @@ The app needs a proper entry point with clear navigation to main features:
 
 ---
 
-## Phase 2: Fix Core Functionality
+## Phase 2: Fix Core Functionality ✅
 
-### 2. List View Bugs
+### 2. List View Bugs ✅
 **Issue:** #2 | **Doc:** [002-list-view-bugs.md](bugs/002-list-view-bugs.md)  
-**Priority:** 🔴 High
+**Priority:** 🔴 High | **Status:** Done (commit d5bb5ce)
 
-Multiple bugs in the list view that break core functionality:
-- Items not scrollable
-- Confusing "Done" button
-- Items not clickable
+Fixed:
+- ✅ Items now scrollable (ScrollView)
+- ✅ Back button in header (replaced "Done")
+- ✅ Items tappable with haptic feedback
+- ⏳ Item detail view (future)
 
-**Why Second:** Users can't effectively view or interact with lists — the core purpose of the app.
-
-### 3. My Lists View Bug
+### 3. My Lists View Bug ✅
 **Issue:** #1 | **Doc:** [001-my-lists-view-bug.md](bugs/001-my-lists-view-bug.md)  
-**Priority:** 🟡 Low
+**Priority:** 🟡 Low | **Status:** Done (commit d5bb5ce)
 
-Quick fix: Change "View Results" → "View List"
-
-**Why Here:** Quick win, can be done alongside Phase 2 work.
+Fixed: "View Results" → "View List"
 
 ---
 
@@ -78,13 +75,13 @@ Add tabbed browse interface:
 
 ## Quick Reference
 
-| Phase | Issue | Title | Priority | Effort |
+| Phase | Issue | Title | Priority | Status |
 |-------|-------|-------|----------|--------|
-| 1 | #3 | Home / Landing Page | 🔴 Critical | Medium |
-| 2 | #2 | List View Bugs | 🔴 High | Medium |
-| 2 | #1 | My Lists View Bug | 🟡 Low | Small |
-| 3 | #5 | List Management | 🟠 High | Large |
-| 4 | #4 | Browse Page Tabs | 🟢 Low | Medium |
+| 1 | #3 | Home / Landing Page | 🔴 Critical | ✅ Done |
+| 2 | #2 | List View Bugs | 🔴 High | ✅ Done |
+| 2 | #1 | My Lists View Bug | 🟡 Low | ✅ Done |
+| 3 | #5 | List Management | 🟠 High | 🔲 Todo |
+| 4 | #4 | Browse Page Tabs | 🟢 Low | 🔲 Todo |
 
 ---
 
