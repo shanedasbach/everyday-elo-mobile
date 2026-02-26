@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, ScrollView } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { expectedScore, K_FACTOR } from '../../lib/elo';
@@ -262,24 +262,38 @@ export default function RankScreen() {
     const sorted = [...rankedItems].sort((a, b) => b.rating - a.rating);
     return (
       <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+            <Text style={styles.backButtonText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
+          <View style={{ width: 60 }} />
+        </View>
+        
         <View style={styles.resultsHeader}>
           <Text style={styles.resultsTitle}>🏆 Your Rankings</Text>
-          <Text style={styles.resultsSubtitle}>{listTitle}</Text>
+          <Text style={styles.resultsSubtitle}>{comparisons} comparisons completed</Text>
         </View>
         
-        <View style={styles.resultsList}>
+        <ScrollView style={styles.resultsList} contentContainerStyle={styles.resultsContent}>
           {sorted.map((item, index) => (
-            <View key={item.id} style={styles.resultItem}>
-              <Text style={styles.resultRank}>#{index + 1}</Text>
+            <TouchableOpacity 
+              key={item.id} 
+              style={styles.resultItem}
+              activeOpacity={0.7}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                // TODO: Navigate to item detail view
+              }}
+            >
+              <View style={[styles.rankBadge, index === 0 && styles.goldBadge, index === 1 && styles.silverBadge, index === 2 && styles.bronzeBadge]}>
+                <Text style={[styles.resultRank, index < 3 && styles.topThreeRank]}>#{index + 1}</Text>
+              </View>
               <Text style={styles.resultName}>{item.name}</Text>
               <Text style={styles.resultRating}>{item.rating}</Text>
-            </View>
+            </TouchableOpacity>
           ))}
-        </View>
-        
-        <TouchableOpacity style={styles.doneButton} onPress={() => router.back()}>
-          <Text style={styles.doneButtonText}>Done</Text>
-        </TouchableOpacity>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -365,6 +379,15 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     padding: 4,
   },
+  backButton: {
+    paddingVertical: 4,
+    paddingRight: 8,
+  },
+  backButtonText: {
+    fontSize: 16,
+    color: '#3B82F6',
+    fontWeight: '500',
+  },
   title: {
     fontSize: 18,
     fontWeight: '600',
@@ -437,14 +460,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 48,
   },
-  backButton: {
-    marginTop: 16,
-    alignSelf: 'center',
-  },
-  backButtonText: {
-    color: '#3B82F6',
-    fontSize: 16,
-  },
   resultsHeader: {
     alignItems: 'center',
     paddingVertical: 24,
@@ -461,7 +476,10 @@ const styles = StyleSheet.create({
   },
   resultsList: {
     flex: 1,
+  },
+  resultsContent: {
     paddingHorizontal: 16,
+    paddingBottom: 24,
   },
   resultItem: {
     flexDirection: 'row',
@@ -470,12 +488,37 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 12,
     marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  rankBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F3F4F6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  goldBadge: {
+    backgroundColor: '#FEF3C7',
+  },
+  silverBadge: {
+    backgroundColor: '#E5E7EB',
+  },
+  bronzeBadge: {
+    backgroundColor: '#FED7AA',
   },
   resultRank: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
-    color: '#3B82F6',
-    width: 40,
+    color: '#6B7280',
+  },
+  topThreeRank: {
+    color: '#111827',
   },
   resultName: {
     flex: 1,
@@ -484,18 +527,7 @@ const styles = StyleSheet.create({
   },
   resultRating: {
     fontSize: 14,
-    color: '#6B7280',
-  },
-  doneButton: {
-    backgroundColor: '#3B82F6',
-    margin: 16,
-    padding: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  doneButtonText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 16,
+    color: '#9CA3AF',
+    marginLeft: 8,
   },
 });

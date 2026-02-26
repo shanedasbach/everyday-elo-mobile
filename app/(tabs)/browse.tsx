@@ -3,8 +3,16 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet, RefreshControl, A
 import { Link } from 'expo-router';
 import { getTemplateLists, List } from '../../lib/api';
 
+// Simple template type that works for both API and offline data
+interface Template {
+  id: string;
+  title: string;
+  description?: string;
+  share_code?: string;
+}
+
 // Fallback template data for offline use
-const fallbackTemplates = [
+const fallbackTemplates: Template[] = [
   { id: 'movies', title: 'Top 10 Movies of All Time', description: 'Rank the greatest films ever made', share_code: 'movies' },
   { id: 'pizza', title: 'Best Pizza Toppings', description: 'What goes on the perfect pizza?', share_code: 'pizza' },
   { id: 'marvel', title: 'Best Marvel Movies', description: 'Rank the MCU', share_code: 'marvel' },
@@ -16,7 +24,7 @@ const fallbackTemplates = [
 ];
 
 export default function BrowseScreen() {
-  const [templates, setTemplates] = useState<(List | typeof fallbackTemplates[0])[]>(fallbackTemplates);
+  const [templates, setTemplates] = useState<Template[]>(fallbackTemplates);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -24,7 +32,7 @@ export default function BrowseScreen() {
     try {
       const supabaseTemplates = await getTemplateLists();
       if (supabaseTemplates.length > 0) {
-        setTemplates(supabaseTemplates);
+        setTemplates(supabaseTemplates as Template[]);
       }
     } catch (error) {
       console.log('Using offline templates');
@@ -51,13 +59,8 @@ export default function BrowseScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
       }
     >
-      <View style={styles.header}>
-        <Text style={styles.emoji}>🏆</Text>
-        <Text style={styles.title}>Everyday Elo</Text>
-        <Text style={styles.subtitle}>Rank anything with rapid-fire comparisons</Text>
-      </View>
-
-      <Text style={styles.sectionTitle}>Templates</Text>
+      <Text style={styles.sectionTitle}>Popular Templates</Text>
+      <Text style={styles.sectionSubtitle}>Quick start with curated lists</Text>
       
       {loading ? (
         <View style={styles.loadingContainer}>
@@ -67,12 +70,12 @@ export default function BrowseScreen() {
         templates.map((template) => (
           <Link 
             key={template.id} 
-            href={`/rank/${'share_code' in template ? template.share_code : template.id}`} 
+            href={`/rank/${template.share_code || template.id}`} 
             asChild
           >
             <TouchableOpacity style={styles.card}>
               <Text style={styles.cardTitle}>{template.title}</Text>
-              {'description' in template && template.description && (
+              {template.description && (
                 <Text style={styles.cardDescription}>{template.description}</Text>
               )}
             </TouchableOpacity>
@@ -100,32 +103,19 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#F9FAFB',
   },
-  header: {
-    alignItems: 'center',
-    paddingVertical: 32,
-    paddingHorizontal: 16,
-  },
-  emoji: {
-    fontSize: 48,
-    marginBottom: 8,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#111827',
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#6B7280',
-    textAlign: 'center',
-  },
   sectionTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '600',
     color: '#111827',
     paddingHorizontal: 16,
-    marginBottom: 12,
+    paddingTop: 16,
+    marginBottom: 4,
+  },
+  sectionSubtitle: {
+    fontSize: 14,
+    color: '#6B7280',
+    paddingHorizontal: 16,
+    marginBottom: 16,
   },
   loadingContainer: {
     padding: 32,

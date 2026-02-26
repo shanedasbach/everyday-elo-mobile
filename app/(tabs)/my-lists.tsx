@@ -117,7 +117,7 @@ export default function MyListsScreen() {
               label: 'Completed',
               bg: '#D1FAE5',
               text: '#059669',
-              action: 'View Results',
+              action: 'View List',
             },
           }[list.rankingStatus];
 
