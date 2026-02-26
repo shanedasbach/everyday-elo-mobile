@@ -13,14 +13,14 @@
 | List detail | ✅ | ✅ | - |
 | Share list | ✅ | ✅ | - |
 | Sign in | ✅ | ✅ | - |
-| **Sign up** | ✅ | ❌ | 🔴 High |
-| **Profile (edit name, stats)** | ✅ | ⏳ | 🟠 Medium |
-| **Bulk add items** | ✅ | ❌ | 🔴 High |
-| **Save & Exit ranking** | ✅ | ❌ | 🔴 High |
-| **Skip comparison** | ✅ | ❌ | 🟠 Medium |
+| **Sign up** | ✅ | ✅ | - |
+| **Profile (edit name, stats)** | ✅ | ✅ | - |
+| **Bulk add items** | ✅ | ✅ | - |
+| **Save & Exit ranking** | ✅ | ✅ | - |
+| **Skip comparison** | ✅ | ✅ | - |
 | **Add items after ranking** | ✅ | ❌ | 🟠 Medium |
 | **Express mode** | ✅ | ❌ | 🟢 Low |
-| **Forgot password** | ✅ | ❌ | 🟠 Medium |
+| **Forgot password** | ✅ | ✅ | - |
 | **Reset password** | ✅ | ❌ | 🟠 Medium |
 | **Featured lists (API)** | ✅ | ❌ | 🟢 Low |
 | **Item actions (boost/remove)** | ✅ | ❌ | 🟢 Low |
