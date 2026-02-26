@@ -3,6 +3,7 @@ import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Alert,
 import { router } from 'expo-router';
 import { createList, addListItems } from '../../lib/api';
 import { useAuth } from '../../lib/auth-context';
+import BulkAddModal from '../../components/BulkAddModal';
 
 export default function CreateScreen() {
   const { user } = useAuth();
@@ -10,6 +11,11 @@ export default function CreateScreen() {
   const [items, setItems] = useState<string[]>([]);
   const [newItem, setNewItem] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showBulkAdd, setShowBulkAdd] = useState(false);
+
+  const handleBulkAdd = (newItems: string[]) => {
+    setItems([...items, ...newItems]);
+  };
 
   const addItem = () => {
     const trimmed = newItem.trim();
@@ -98,7 +104,12 @@ export default function CreateScreen() {
           editable={!loading}
         />
 
-        <Text style={styles.label}>Add Items</Text>
+        <View style={styles.addItemsHeader}>
+          <Text style={styles.label}>Add Items</Text>
+          <TouchableOpacity onPress={() => setShowBulkAdd(true)} disabled={loading}>
+            <Text style={[styles.bulkAddText, loading && styles.bulkAddTextDisabled]}>📋 Bulk Add</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.addRow}>
           <TextInput
             style={[styles.input, styles.addInput]}
@@ -175,6 +186,13 @@ export default function CreateScreen() {
           </TouchableOpacity>
         )}
       </View>
+
+      <BulkAddModal
+        visible={showBulkAdd}
+        onClose={() => setShowBulkAdd(false)}
+        onAdd={handleBulkAdd}
+        existingItems={items}
+      />
     </ScrollView>
   );
 }
@@ -187,11 +205,24 @@ const styles = StyleSheet.create({
   content: {
     padding: 16,
   },
+  addItemsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
   label: {
     fontSize: 14,
     fontWeight: '500',
     color: '#374151',
-    marginBottom: 8,
+  },
+  bulkAddText: {
+    fontSize: 14,
+    color: '#3B82F6',
+    fontWeight: '500',
+  },
+  bulkAddTextDisabled: {
+    color: '#9CA3AF',
   },
   input: {
     backgroundColor: '#fff',

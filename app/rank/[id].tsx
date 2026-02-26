@@ -314,6 +314,19 @@ export default function RankScreen() {
   const estimated = Math.ceil(rankedItems.length * 2);
   const progressPercent = Math.min(100, (comparisons / estimated) * 100);
 
+  const handleSaveAndExit = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    // Progress is already saved to Supabase after each comparison
+    // Just navigate back to my lists
+    router.replace('/(tabs)/my-lists');
+  };
+
+  const handleSkip = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // Select a new pair without recording anything
+    selectNextPair(rankedItems);
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -321,7 +334,13 @@ export default function RankScreen() {
           <Text style={styles.closeButton}>✕</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
-        <View style={{ width: 24 }} />
+        {!useOfflineMode && user ? (
+          <TouchableOpacity onPress={handleSaveAndExit} style={styles.saveExitButton}>
+            <Text style={styles.saveExitText}>💾</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 24 }} />
+        )}
       </View>
 
       <View style={styles.progressContainer}>
@@ -354,6 +373,10 @@ export default function RankScreen() {
           <Text style={styles.cardText}>{itemB.name}</Text>
         </TouchableOpacity>
       </View>
+
+      <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
+        <Text style={styles.skipText}>Can't decide? Skip this one</Text>
+      </TouchableOpacity>
     </SafeAreaView>
   );
 }
@@ -453,6 +476,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: '#9CA3AF',
+  },
+  saveExitButton: {
+    padding: 4,
+  },
+  saveExitText: {
+    fontSize: 20,
+  },
+  skipButton: {
+    alignItems: 'center',
+    paddingVertical: 16,
+    marginBottom: 16,
+  },
+  skipText: {
+    fontSize: 14,
+    color: '#9CA3AF',
+    textDecorationLine: 'underline',
   },
   errorText: {
     fontSize: 16,
