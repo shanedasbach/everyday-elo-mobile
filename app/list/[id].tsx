@@ -14,12 +14,15 @@ import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../../lib/auth-context';
 import ListActionSheet, { ActionItem } from '../../components/ListActionSheet';
+import AddItemModal from '../../components/AddItemModal';
+import BulkAddModal from '../../components/BulkAddModal';
 import {
   getList,
   getListByShareCode,
   getListItems,
   getRankedItems,
   deleteList,
+  addListItem,
   List,
   ListItem,
 } from '../../lib/api';
@@ -39,6 +42,8 @@ export default function ListDetailScreen() {
   const [items, setItems] = useState<RankedListItem[]>([]);
   const [isOwner, setIsOwner] = useState(false);
   const [showActions, setShowActions] = useState(false);
+  const [showAddItem, setShowAddItem] = useState(false);
+  const [showBulkAdd, setShowBulkAdd] = useState(false);
   const [rankingStatus, setRankingStatus] = useState<'not_started' | 'in_progress' | 'completed'>('not_started');
 
   const loadList = useCallback(async () => {
@@ -163,6 +168,36 @@ export default function ListDetailScreen() {
     Alert.alert('Coming Soon', 'Duplicate list feature is coming soon!');
   };
 
+  const handleAddItem = async (name: string) => {
+    if (!list) return;
+    
+    try {
+      const newItem = await addListItem(list.id, name);
+      setItems([...items, { ...newItem, rank: undefined, rating: undefined }]);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      console.error('Failed to add item:', error);
+      Alert.alert('Error', 'Failed to add item');
+    }
+  };
+
+  const handleBulkAdd = async (names: string[]) => {
+    if (!list) return;
+    
+    try {
+      const newItems: RankedListItem[] = [];
+      for (const name of names) {
+        const newItem = await addListItem(list.id, name);
+        newItems.push({ ...newItem, rank: undefined, rating: undefined });
+      }
+      setItems([...items, ...newItems]);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      console.error('Failed to add items:', error);
+      Alert.alert('Error', 'Failed to add items');
+    }
+  };
+
   const getActions = (): ActionItem[] => {
     const actions: ActionItem[] = [
       { label: 'Share List', icon: '🔗', onPress: handleShare },
@@ -170,13 +205,15 @@ export default function ListDetailScreen() {
 
     if (isOwner) {
       actions.push(
+        { label: 'Add Item', icon: '➕', onPress: () => setShowAddItem(true) },
+        { label: 'Bulk Add Items', icon: '📋', onPress: () => setShowBulkAdd(true) },
         { label: rankingStatus === 'not_started' ? 'Start Ranking' : 'Rerank List', icon: '🔄', onPress: handleRerank },
-        { label: 'Duplicate List', icon: '📋', onPress: handleDuplicate },
+        { label: 'Duplicate List', icon: '📄', onPress: handleDuplicate },
         { label: 'Delete List', icon: '🗑️', onPress: handleDelete, destructive: true },
       );
     } else {
       actions.push(
-        { label: 'Duplicate List', icon: '📋', onPress: handleDuplicate },
+        { label: 'Duplicate List', icon: '📄', onPress: handleDuplicate },
       );
       
       if (rankingStatus !== 'not_started') {
@@ -253,9 +290,16 @@ export default function ListDetailScreen() {
         </View>
 
         <View style={styles.itemsSection}>
-          <Text style={styles.sectionTitle}>
-            {rankingStatus === 'completed' ? 'Your Rankings' : 'Items'}
-          </Text>
+          <View style={styles.itemsHeader}>
+            <Text style={styles.sectionTitle}>
+              {rankingStatus === 'completed' ? 'Your Rankings' : 'Items'}
+            </Text>
+            {isOwner && (
+              <TouchableOpacity onPress={() => setShowAddItem(true)}>
+                <Text style={styles.addItemLink}>+ Add Item</Text>
+              </TouchableOpacity>
+            )}
+          </View>
           
           {items.map((item, index) => (
             <View key={item.id} style={styles.itemRow}>
@@ -314,6 +358,20 @@ export default function ListDetailScreen() {
         onClose={() => setShowActions(false)}
         title="List Options"
         actions={getActions()}
+      />
+
+      <AddItemModal
+        visible={showAddItem}
+        onClose={() => setShowAddItem(false)}
+        onAdd={handleAddItem}
+        existingItems={items.map(i => i.name)}
+      />
+
+      <BulkAddModal
+        visible={showBulkAdd}
+        onClose={() => setShowBulkAdd(false)}
+        onAdd={handleBulkAdd}
+        existingItems={items.map(i => i.name)}
       />
     </SafeAreaView>
   );
@@ -412,11 +470,21 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 16,
   },
+  itemsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '600',
     color: '#111827',
-    marginBottom: 12,
+  },
+  addItemLink: {
+    fontSize: 14,
+    color: '#3B82F6',
+    fontWeight: '500',
   },
   itemRow: {
     flexDirection: 'row',

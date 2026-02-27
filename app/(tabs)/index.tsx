@@ -44,12 +44,12 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </Link>
 
-        <Link href="/(tabs)/create?quickAdd=true" asChild>
+        <Link href="/quick-add" asChild>
           <TouchableOpacity style={styles.button}>
             <Text style={styles.buttonEmoji}>⚡</Text>
             <View style={styles.buttonTextContainer}>
               <Text style={styles.buttonTitle}>Quick Add</Text>
-              <Text style={styles.buttonDescription}>Fast add items to a list</Text>
+              <Text style={styles.buttonDescription}>Add items to existing list</Text>
             </View>
           </TouchableOpacity>
         </Link>
