@@ -426,3 +426,30 @@ export async function recordComparison(
 
   if (error) throw error;
 }
+
+// ============================================
+// DUPLICATE LIST
+// ============================================
+
+export async function duplicateList(sourceListId: string): Promise<List> {
+  // Get source list
+  const source = await getList(sourceListId);
+  if (!source) throw new Error('Source list not found');
+
+  // Get source items
+  const sourceItems = await getListItems(sourceListId);
+
+  // Create new list
+  const newList = await createList({
+    title: `${source.title} (copy)`,
+    description: source.description,
+    comparison_prompt: source.comparison_prompt,
+  });
+
+  // Copy items
+  if (sourceItems.length > 0) {
+    await addListItems(newList.id, sourceItems.map(i => i.name));
+  }
+
+  return newList;
+}

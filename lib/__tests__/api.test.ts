@@ -44,6 +44,7 @@ import {
   markRankingComplete,
   recordComparison,
   getFeaturedLists,
+  duplicateList,
   List,
   ListItem,
   Ranking,
@@ -1084,6 +1085,139 @@ describe('API Module', () => {
         estimatedComparisons: 10,
       };
       expect(listWithStatus.rankingStatus).toBe('in_progress');
+    });
+  });
+
+  // ============================================
+  // USE CASE 8: Duplicating a List
+  // ============================================
+  describe('Duplicating a List', () => {
+    const sourceList = {
+      id: 'source-list',
+      title: 'My Favorites',
+      description: 'A great list',
+      comparison_prompt: 'Which do you prefer?',
+      creator_id: 'user-123',
+      share_code: 'src001',
+      is_private: false,
+      is_template: false,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
+    const sourceItems = [
+      { id: 'i1', list_id: 'source-list', name: 'Alpha', display_order: 0, created_at: '' },
+      { id: 'i2', list_id: 'source-list', name: 'Beta', display_order: 1, created_at: '' },
+    ];
+
+    const copiedList = {
+      id: 'new-list',
+      title: 'My Favorites (copy)',
+      description: 'A great list',
+      comparison_prompt: 'Which do you prefer?',
+      creator_id: 'user-123',
+      share_code: 'new001',
+      is_private: false,
+      is_template: false,
+      created_at: '2024-02-01T00:00:00Z',
+      updated_at: '2024-02-01T00:00:00Z',
+    };
+
+    beforeEach(() => {
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: { id: 'user-123' } },
+      });
+    });
+
+    it('should duplicate a list with items', async () => {
+      // duplicateList makes these sequential from() calls:
+      // 0: getList         → from('lists').select().eq().single()
+      // 1: getListItems    → from('list_items').select().eq().order()  [terminal]
+      // 2: createList      → from('lists').insert().select().single()
+      // 3,5: addListItem order-check → from('list_items').select().eq().order().limit() [terminal]
+      // 4,6: addListItem insert      → from('list_items').insert().select().single()
+      let callIndex = 0;
+      let limitCallIndex = 0;
+      let singleCallIndex = 0;
+      const singleResults = [
+        { data: sourceList, error: null },   // getList
+        { data: copiedList, error: null },   // createList
+        { data: sourceItems[0], error: null }, // addListItem item 1 insert
+        { data: sourceItems[1], error: null }, // addListItem item 2 insert
+      ];
+
+      (mockSupabase.from as jest.Mock).mockImplementation(() => {
+        const idx = callIndex++;
+        const chain: Record<string, jest.Mock> = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockImplementation(() => {
+            limitCallIndex++;
+            return Promise.resolve({ data: [] }); // no existing items for order check
+          }),
+          single: jest.fn().mockImplementation(() => {
+            const result = singleResults[singleCallIndex];
+            singleCallIndex++;
+            return Promise.resolve(result);
+          }),
+        };
+        // getListItems (idx 1) uses order() as terminal
+        if (idx === 1) {
+          chain.order = jest.fn().mockResolvedValue({ data: sourceItems, error: null });
+        }
+        return chain;
+      });
+
+      const result = await duplicateList('source-list');
+
+      expect(result.title).toBe('My Favorites (copy)');
+      expect(result.id).toBe('new-list');
+    });
+
+    it('should duplicate an empty list (no items)', async () => {
+      // Empty list: getList, getListItems (returns []), createList — no addListItems
+      let callIndex = 0;
+      let singleCallIndex = 0;
+      const singleResults = [
+        { data: sourceList, error: null },   // getList
+        { data: copiedList, error: null },   // createList
+      ];
+
+      (mockSupabase.from as jest.Mock).mockImplementation(() => {
+        const idx = callIndex++;
+        const chain: Record<string, jest.Mock> = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+          single: jest.fn().mockImplementation(() => {
+            const result = singleResults[singleCallIndex];
+            singleCallIndex++;
+            return Promise.resolve(result);
+          }),
+        };
+        if (idx === 1) {
+          chain.order = jest.fn().mockResolvedValue({ data: [], error: null });
+        }
+        return chain;
+      });
+
+      const result = await duplicateList('source-list');
+
+      expect(result.title).toBe('My Favorites (copy)');
+    });
+
+    it('should throw when source list does not exist', async () => {
+      (mockSupabase.from as jest.Mock).mockImplementation(() => ({
+        select: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+      }));
+
+      await expect(duplicateList('nonexistent')).rejects.toThrow('Source list not found');
     });
   });
 });
