@@ -355,6 +355,32 @@ export async function getRanking(id: string): Promise<Ranking | null> {
   return data;
 }
 
+export async function getUserRankingForList(listId: string, userId: string): Promise<Ranking | null> {
+  const { data, error } = await supabase
+    .from('rankings')
+    .select('*')
+    .eq('list_id', listId)
+    .eq('user_id', userId)
+    .single();
+
+  if (error) return null;
+  return data;
+}
+
+export async function getCompletedRankingForList(listId: string): Promise<Ranking | null> {
+  const { data, error } = await supabase
+    .from('rankings')
+    .select('*')
+    .eq('list_id', listId)
+    .eq('is_complete', true)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (error) return null;
+  return data;
+}
+
 export async function getRankedItems(rankingId: string): Promise<RankedItem[]> {
   const { data, error } = await supabase
     .from('ranked_items')

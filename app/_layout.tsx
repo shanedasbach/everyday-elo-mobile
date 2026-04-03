@@ -19,6 +19,7 @@ export default function RootLayout() {
         <Stack.Screen name="rank/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="list/[id]" options={{ title: 'List Details' }} />
         <Stack.Screen name="quick-add" options={{ title: 'Quick Add', presentation: 'modal' }} />
+        <Stack.Screen name="share/[code]" options={{ title: 'Shared Ranking', headerShown: false }} />
       </Stack>
     </AuthProvider>
   );
