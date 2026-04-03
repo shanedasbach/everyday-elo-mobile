@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, RefreshControl, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, RefreshControl, ActivityIndicator, Alert } from 'react-native';
 import { Link, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth-context';
 import { getUserListsWithStatus, ListWithStatus, deleteList } from '../../lib/api';
@@ -40,13 +40,27 @@ export default function MyListsScreen() {
     loadLists();
   };
 
-  const handleDelete = async (listId: string) => {
-    try {
-      await deleteList(listId);
-      setLists(lists.filter(l => l.id !== listId));
-    } catch (error) {
-      console.error('Failed to delete list:', error);
-    }
+  const handleDelete = (listId: string) => {
+    const listToDelete = lists.find(l => l.id === listId);
+    Alert.alert(
+      'Delete List',
+      `Are you sure you want to delete "${listToDelete?.title || 'this list'}"? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteList(listId);
+              setLists(lists.filter(l => l.id !== listId));
+            } catch (error) {
+              console.error('Failed to delete list:', error);
+            }
+          },
+        },
+      ]
+    );
   };
 
   if (!user) {

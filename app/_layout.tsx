@@ -17,6 +17,8 @@ export default function RootLayout() {
         <Stack.Screen name="(auth)/sign-in" options={{ title: 'Sign In', presentation: 'modal' }} />
         <Stack.Screen name="(auth)/sign-up" options={{ title: 'Sign Up', presentation: 'modal' }} />
         <Stack.Screen name="rank/[id]" options={{ headerShown: false }} />
+        <Stack.Screen name="list/[id]" options={{ title: 'List Details' }} />
+        <Stack.Screen name="quick-add" options={{ title: 'Quick Add', presentation: 'modal' }} />
       </Stack>
     </AuthProvider>
   );
