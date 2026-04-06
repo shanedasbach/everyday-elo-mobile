@@ -15,7 +15,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.everydayelo.app"
+      "bundleIdentifier": "com.everydayelo.app",
+      "associatedDomains": [
+        "applinks:everyday-elo.app"
+      ]
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +26,21 @@
         "backgroundColor": "#3B82F6"
       },
       "package": "com.everydayelo.app",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "everyday-elo.app",
+              "pathPrefix": "/share/"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png",

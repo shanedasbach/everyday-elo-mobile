@@ -16,6 +16,7 @@ module.exports = {
   collectCoverageFrom: [
     'lib/elo.ts',
     'lib/api.ts',
+    'lib/deep-linking.ts',
   ],
   coverageThreshold: {
     global: {

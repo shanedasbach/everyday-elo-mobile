@@ -23,6 +23,7 @@ import {
   getRankedItems,
   deleteList,
   addListItem,
+  duplicateList,
   List,
   ListItem,
 } from '../../lib/api';
@@ -163,9 +164,21 @@ export default function ListDetailScreen() {
     );
   };
 
-  const handleDuplicate = () => {
-    // TODO: Implement duplicate functionality
-    Alert.alert('Coming Soon', 'Duplicate list feature is coming soon!');
+  const handleDuplicate = async () => {
+    if (!list) return;
+    if (!user) {
+      Alert.alert('Sign In Required', 'Please sign in to duplicate lists');
+      return;
+    }
+
+    try {
+      const newList = await duplicateList(list.id);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      router.push(`/list/${newList.id}`);
+    } catch (error: any) {
+      console.error('Duplicate failed:', error);
+      Alert.alert('Error', error.message || 'Failed to duplicate list');
+    }
   };
 
   const handleAddItem = async (name: string) => {

@@ -7,11 +7,11 @@ import { useAuth } from '../../lib/auth-context';
 import { supabase } from '../../lib/supabase';
 import AddItemModal from '../../components/AddItemModal';
 import ItemActionMenu, { ItemAction } from '../../components/ItemActionMenu';
-import { 
-  getList, 
-  getListByShareCode, 
-  getListItems, 
-  createRanking, 
+import {
+  getList,
+  getListByShareCode,
+  getListItems,
+  createRanking,
   getRankedItems,
   updateRankedItem,
   incrementComparisonsCount,
@@ -23,42 +23,7 @@ import {
   ListItem,
   RankedItem,
 } from '../../lib/api';
-
-// Template data for offline/demo use
-const templateData: Record<string, { title: string; items: string[] }> = {
-  movies: {
-    title: 'Top 10 Movies of All Time',
-    items: ['The Godfather', 'The Shawshank Redemption', 'The Dark Knight', 'Pulp Fiction', 'Schindler\'s List', 'The Lord of the Rings: Return of the King', 'Fight Club', 'Forrest Gump', 'Inception', 'The Matrix'],
-  },
-  pizza: {
-    title: 'Best Pizza Toppings',
-    items: ['Pepperoni', 'Mushrooms', 'Sausage', 'Onions', 'Bacon', 'Extra cheese', 'Black olives', 'Green peppers', 'Pineapple', 'Jalapeños'],
-  },
-  marvel: {
-    title: 'Best Marvel Movies',
-    items: ['Avengers: Endgame', 'Avengers: Infinity War', 'Spider-Man: No Way Home', 'Black Panther', 'Guardians of the Galaxy', 'Iron Man', 'Thor: Ragnarok', 'Captain America: Civil War', 'The Avengers', 'Spider-Man: Homecoming'],
-  },
-  albums: {
-    title: 'Greatest Albums',
-    items: ['Abbey Road - The Beatles', 'Thriller - Michael Jackson', 'The Dark Side of the Moon - Pink Floyd', 'Rumours - Fleetwood Mac', 'Back in Black - AC/DC', 'Led Zeppelin IV', 'The Wall - Pink Floyd', 'Purple Rain - Prince', 'OK Computer - Radiohead', 'Nevermind - Nirvana'],
-  },
-  tvshows: {
-    title: 'Best TV Shows',
-    items: ['Breaking Bad', 'Game of Thrones', 'The Wire', 'The Sopranos', 'Friends', 'The Office', 'Stranger Things', 'The Crown', 'Chernobyl', 'Band of Brothers'],
-  },
-  fastfood: {
-    title: 'Best Fast Food Chains',
-    items: ['McDonald\'s', 'Chick-fil-A', 'Wendy\'s', 'Taco Bell', 'In-N-Out', 'Five Guys', 'Chipotle', 'Shake Shack', 'Popeyes', 'Burger King'],
-  },
-  videogames: {
-    title: 'Greatest Video Games',
-    items: ['The Legend of Zelda: Breath of the Wild', 'Red Dead Redemption 2', 'The Witcher 3', 'Minecraft', 'Grand Theft Auto V', 'Elden Ring', 'Super Mario Odyssey', 'God of War (2018)', 'The Last of Us', 'Skyrim'],
-  },
-  disney: {
-    title: 'Best Disney Movies',
-    items: ['The Lion King', 'Frozen', 'Toy Story', 'Finding Nemo', 'Moana', 'Aladdin', 'Beauty and the Beast', 'The Little Mermaid', 'Up', 'Coco'],
-  },
-};
+import { getTemplateById } from '../../lib/templates';
 
 interface LocalRankedItem {
   id: string;
@@ -98,7 +63,7 @@ export default function RankScreen() {
     if (!id) return;
 
     // Check if it's a template code
-    const template = templateData[id];
+    const template = getTemplateById(id);
     if (template) {
       // Use offline mode for templates
       setUseOfflineMode(true);

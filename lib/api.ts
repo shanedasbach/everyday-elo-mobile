@@ -355,6 +355,32 @@ export async function getRanking(id: string): Promise<Ranking | null> {
   return data;
 }
 
+export async function getUserRankingForList(listId: string, userId: string): Promise<Ranking | null> {
+  const { data, error } = await supabase
+    .from('rankings')
+    .select('*')
+    .eq('list_id', listId)
+    .eq('user_id', userId)
+    .single();
+
+  if (error) return null;
+  return data;
+}
+
+export async function getCompletedRankingForList(listId: string): Promise<Ranking | null> {
+  const { data, error } = await supabase
+    .from('rankings')
+    .select('*')
+    .eq('list_id', listId)
+    .eq('is_complete', true)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (error) return null;
+  return data;
+}
+
 export async function getRankedItems(rankingId: string): Promise<RankedItem[]> {
   const { data, error } = await supabase
     .from('ranked_items')
@@ -425,4 +451,31 @@ export async function recordComparison(
     });
 
   if (error) throw error;
+}
+
+// ============================================
+// DUPLICATE LIST
+// ============================================
+
+export async function duplicateList(sourceListId: string): Promise<List> {
+  // Get source list
+  const source = await getList(sourceListId);
+  if (!source) throw new Error('Source list not found');
+
+  // Get source items
+  const sourceItems = await getListItems(sourceListId);
+
+  // Create new list
+  const newList = await createList({
+    title: `${source.title} (copy)`,
+    description: source.description,
+    comparison_prompt: source.comparison_prompt,
+  });
+
+  // Copy items
+  if (sourceItems.length > 0) {
+    await addListItems(newList.id, sourceItems.map(i => i.name));
+  }
+
+  return newList;
 }
