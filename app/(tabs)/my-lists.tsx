@@ -56,6 +56,7 @@ export default function MyListsScreen() {
               setLists(lists.filter(l => l.id !== listId));
             } catch (error) {
               console.error('Failed to delete list:', error);
+              Alert.alert('Error', 'Failed to delete list. Please try again.');
             }
           },
         },

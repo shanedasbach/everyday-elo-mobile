@@ -17,6 +17,7 @@ module.exports = {
     'lib/elo.ts',
     'lib/api.ts',
     'lib/deep-linking.ts',
+    'lib/templates.ts',
   ],
   coverageThreshold: {
     global: {

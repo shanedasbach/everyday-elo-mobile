@@ -43,7 +43,11 @@ export default function ShareScreen() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!code) return;
+    if (!code) {
+      setError('Invalid share link');
+      setLoading(false);
+      return;
+    }
     loadSharedRanking(code);
   }, [code]);
 
