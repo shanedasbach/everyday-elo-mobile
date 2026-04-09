@@ -470,6 +470,7 @@ export async function duplicateList(sourceListId: string): Promise<List> {
     title: `${source.title} (copy)`,
     description: source.description,
     comparison_prompt: source.comparison_prompt,
+    is_private: source.is_private,
   });
 
   // Copy items
