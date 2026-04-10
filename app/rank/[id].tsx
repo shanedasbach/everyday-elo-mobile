@@ -24,6 +24,11 @@ import {
   RankedItem,
 } from '../../lib/api';
 import { getTemplateById } from '../../lib/templates';
+import {
+  savePartialRanking,
+  getPartialRanking,
+  clearPartialRanking,
+} from '../../lib/partial-ranking';
 
 interface LocalRankedItem {
   id: string;
@@ -68,13 +73,31 @@ export default function RankScreen() {
       // Use offline mode for templates
       setUseOfflineMode(true);
       setListTitle(template.title);
-      const items = template.items.map((name, index) => ({
+
+      // Attempt to resume a previously saved partial ranking for this template
+      const partial = await getPartialRanking(id);
+      const defaultItems: LocalRankedItem[] = template.items.map((name, index) => ({
         id: `local-${index}`,
         itemId: `local-${index}`,
         name,
         rating: 1500,
         comparisons: 0,
       }));
+
+      let items = defaultItems;
+      if (partial && partial.items.length === template.items.length) {
+        // Merge saved ratings/comparisons back onto the template items,
+        // matched by itemId (stable local id derived from template order).
+        const byId = new Map(partial.items.map(p => [p.itemId, p]));
+        items = defaultItems.map(d => {
+          const saved = byId.get(d.itemId);
+          return saved
+            ? { ...d, rating: saved.rating, comparisons: saved.comparisons }
+            : d;
+        });
+        setComparisons(partial.comparisons);
+      }
+
       setRankedItems(items);
       selectNextPair(items);
       setLoading(false);
@@ -206,18 +229,42 @@ export default function RankScreen() {
       } catch (error) {
         console.error('Failed to save comparison:', error);
       }
+    } else if (useOfflineMode && id) {
+      // Persist offline/template progress after each comparison so save & exit
+      // (including unexpected backgrounding) resumes from the latest state.
+      try {
+        await savePartialRanking(
+          id,
+          newItems.map(i => ({
+            itemId: i.itemId,
+            name: i.name,
+            rating: i.rating,
+            comparisons: i.comparisons,
+          })),
+          comparisons + 1
+        );
+      } catch (error) {
+        console.error('Failed to save partial ranking:', error);
+      }
     }
-    
+
     // Check if complete
     if (newItems.every((item) => item.comparisons >= 2)) {
       setIsComplete(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      
+
       if (!useOfflineMode && rankingId) {
         try {
           await markRankingComplete(rankingId);
         } catch (error) {
           console.error('Failed to mark complete:', error);
+        }
+      } else if (useOfflineMode && id) {
+        // Clear partial storage once the template ranking is finished.
+        try {
+          await clearPartialRanking(id);
+        } catch (error) {
+          console.error('Failed to clear partial ranking:', error);
         }
       }
     } else {
@@ -456,11 +503,33 @@ export default function RankScreen() {
   const estimated = Math.ceil(rankedItems.length * 2);
   const progressPercent = Math.min(100, (comparisons / estimated) * 100);
 
-  const handleSaveAndExit = () => {
+  const handleSaveAndExit = async () => {
+    // For Supabase-backed rankings, progress auto-saves after each comparison.
+    // For offline/template rankings, flush the latest state to SecureStore
+    // before navigating away.
+    if (useOfflineMode && id) {
+      try {
+        await savePartialRanking(
+          id,
+          rankedItems.map(i => ({
+            itemId: i.itemId,
+            name: i.name,
+            rating: i.rating,
+            comparisons: i.comparisons,
+          })),
+          comparisons
+        );
+      } catch (error) {
+        console.error('Failed to save partial ranking:', error);
+      }
+    }
+
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    // Progress is already saved to Supabase after each comparison
-    // Just navigate back to my lists
-    router.replace('/(tabs)/my-lists');
+    if (useOfflineMode) {
+      router.replace('/(tabs)/browse');
+    } else {
+      router.replace('/(tabs)/my-lists');
+    }
   };
 
   const handleSkip = () => {
@@ -481,8 +550,12 @@ export default function RankScreen() {
           <Text style={styles.closeButton}>✕</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
-        {!useOfflineMode && user ? (
-          <TouchableOpacity onPress={handleSaveAndExit} style={styles.saveExitButton}>
+        {(!useOfflineMode && user) || useOfflineMode ? (
+          <TouchableOpacity
+            onPress={handleSaveAndExit}
+            style={styles.saveExitButton}
+            accessibilityLabel="Save and exit"
+          >
             <Text style={styles.saveExitText}>💾</Text>
           </TouchableOpacity>
         ) : (

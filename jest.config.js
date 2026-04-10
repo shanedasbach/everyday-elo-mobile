@@ -18,6 +18,7 @@ module.exports = {
     'lib/api.ts',
     'lib/deep-linking.ts',
     'lib/templates.ts',
+    'lib/partial-ranking.ts',
   ],
   coverageThreshold: {
     global: {
