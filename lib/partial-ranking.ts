@@ -45,16 +45,44 @@ export async function savePartialRanking(
   await SecureStore.setItemAsync(keyFor(listId), JSON.stringify(payload));
 }
 
+function isValidPartialItem(value: unknown): value is PartialRankedItem {
+  if (typeof value !== 'object' || value === null) return false;
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.itemId === 'string' &&
+    typeof item.name === 'string' &&
+    typeof item.rating === 'number' &&
+    Number.isFinite(item.rating) &&
+    typeof item.comparisons === 'number' &&
+    Number.isFinite(item.comparisons) &&
+    item.comparisons >= 0
+  );
+}
+
 export async function getPartialRanking(
   listId: string
 ): Promise<PartialRanking | null> {
   const raw = await SecureStore.getItemAsync(keyFor(listId));
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as PartialRanking;
-    if (parsed.version !== VERSION || parsed.listId !== listId) return null;
-    if (!Array.isArray(parsed.items)) return null;
-    return parsed;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const candidate = parsed as Record<string, unknown>;
+    if (candidate.version !== VERSION) return null;
+    if (candidate.listId !== listId) return null;
+    if (typeof candidate.comparisons !== 'number') return null;
+    if (!Number.isFinite(candidate.comparisons)) return null;
+    if (candidate.comparisons < 0) return null;
+    if (!Array.isArray(candidate.items)) return null;
+    if (!candidate.items.every(isValidPartialItem)) return null;
+    if (typeof candidate.updatedAt !== 'string') return null;
+    return {
+      version: VERSION,
+      listId,
+      comparisons: candidate.comparisons,
+      items: candidate.items,
+      updatedAt: candidate.updatedAt,
+    };
   } catch {
     return null;
   }

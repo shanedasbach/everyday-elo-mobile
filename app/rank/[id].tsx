@@ -87,15 +87,23 @@ export default function RankScreen() {
       let items = defaultItems;
       if (partial && partial.items.length === template.items.length) {
         // Merge saved ratings/comparisons back onto the template items,
-        // matched by itemId (stable local id derived from template order).
-        const byId = new Map(partial.items.map(p => [p.itemId, p]));
-        items = defaultItems.map(d => {
-          const saved = byId.get(d.itemId);
-          return saved
-            ? { ...d, rating: saved.rating, comparisons: saved.comparisons }
-            : d;
-        });
-        setComparisons(partial.comparisons);
+        // matched by name rather than positional id so that reordering or
+        // substituting items in lib/templates.ts can't silently misattribute
+        // saved ratings to the wrong item. If the set of names has drifted
+        // at all (rename, add, remove), discard the stale partial entirely.
+        const byName = new Map(partial.items.map(p => [p.name, p]));
+        const allMatch = defaultItems.every(d => byName.has(d.name));
+        if (allMatch) {
+          items = defaultItems.map(d => {
+            const saved = byName.get(d.name)!;
+            return { ...d, rating: saved.rating, comparisons: saved.comparisons };
+          });
+          setComparisons(partial.comparisons);
+        } else {
+          // Template contents drifted since the save — drop the stale payload
+          // so the user starts fresh instead of resuming onto mismatched items.
+          await clearPartialRanking(id);
+        }
       }
 
       setRankedItems(items);

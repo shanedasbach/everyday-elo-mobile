@@ -97,6 +97,128 @@ describe('partial-ranking', () => {
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
+
+    it('returns null when the root payload is not an object', async () => {
+      mockStore.getItemAsync.mockResolvedValue('"just a string"');
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when the root payload is JSON null', async () => {
+      mockStore.getItemAsync.mockResolvedValue('null');
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when comparisons is not a number', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: 'lots',
+          items: sampleItems,
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when comparisons is negative', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: -1,
+          items: sampleItems,
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when comparisons is not finite', async () => {
+      // JSON can't express NaN/Infinity literals, but very large exponents
+      // (1e999) parse as Infinity — use that to hit the finite guard without
+      // bypassing JSON.parse.
+      mockStore.getItemAsync.mockResolvedValue(
+        '{"version":1,"listId":"movies","comparisons":1e999,"items":[],"updatedAt":"2026-04-10T00:00:00.000Z"}'
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when updatedAt is missing', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: 2,
+          items: sampleItems,
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when an item is missing required fields', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: 2,
+          items: [{ itemId: 'a', name: 'Alpha', rating: 1520 }],
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when an item has wrong field types', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: 2,
+          items: [
+            { itemId: 'a', name: 'Alpha', rating: '1520', comparisons: 2 },
+          ],
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when an item has negative comparisons', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: 2,
+          items: [
+            { itemId: 'a', name: 'Alpha', rating: 1520, comparisons: -1 },
+          ],
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when an item has a non-finite rating', async () => {
+      // 1e999 parses to Infinity via valid JSON, exercising the finite guard.
+      mockStore.getItemAsync.mockResolvedValue(
+        '{"version":1,"listId":"movies","comparisons":2,"items":[{"itemId":"a","name":"Alpha","rating":1e999,"comparisons":2}],"updatedAt":"2026-04-10T00:00:00.000Z"}'
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
+
+    it('returns null when an item entry is null', async () => {
+      mockStore.getItemAsync.mockResolvedValue(
+        JSON.stringify({
+          version: 1,
+          listId: 'movies',
+          comparisons: 2,
+          items: [null],
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      );
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
   });
 
   describe('clearPartialRanking', () => {
