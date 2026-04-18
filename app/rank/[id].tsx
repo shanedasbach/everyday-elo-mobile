@@ -1,8 +1,20 @@
-import { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, ScrollView, Alert } from 'react-native';
+import { useState, useEffect, useRef } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, ScrollView, Alert, Animated } from 'react-native';
+import {
+  PanGestureHandler,
+  PanGestureHandlerGestureEvent,
+  PanGestureHandlerStateChangeEvent,
+  State,
+} from 'react-native-gesture-handler';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { expectedScore, K_FACTOR } from '../../lib/elo';
+import {
+  SWIPE_THRESHOLD,
+  commitTranslation,
+  crossedHapticThreshold,
+  resolveSwipe,
+} from '../../lib/swipe-gesture';
 import { useAuth } from '../../lib/auth-context';
 import { supabase } from '../../lib/supabase';
 import AddItemModal from '../../components/AddItemModal';
@@ -59,6 +71,13 @@ export default function RankScreen() {
   
   // Express mode - auto-skip obvious matchups
   const [expressMode, setExpressMode] = useState(false);
+
+  // Swipe gesture animation state
+  const translationA = useRef(new Animated.Value(0)).current;
+  const translationB = useRef(new Animated.Value(0)).current;
+  const lastTranslationA = useRef(0);
+  const lastTranslationB = useRef(0);
+  const isAnimatingOut = useRef(false);
 
   useEffect(() => {
     loadList();
@@ -551,6 +570,88 @@ export default function RankScreen() {
     setExpressMode(!expressMode);
   };
 
+  // 'A' card: swipe right = pick A, swipe left = pick B.
+  // 'B' card: swipe right = pick B, swipe left = pick A.
+  const resolveCardChoice = (
+    card: 'A' | 'B',
+    direction: 'left' | 'right',
+  ): { winner: number; loser: number } => {
+    const pickA = (card === 'A' && direction === 'right') || (card === 'B' && direction === 'left');
+    return pickA ? { winner: aIdx, loser: bIdx } : { winner: bIdx, loser: aIdx };
+  };
+
+  const makePanGestureHandler = (card: 'A' | 'B') => {
+    const translation = card === 'A' ? translationA : translationB;
+    const lastRef = card === 'A' ? lastTranslationA : lastTranslationB;
+
+    const onGestureEvent = (event: PanGestureHandlerGestureEvent) => {
+      if (isAnimatingOut.current) return;
+      const { translationX } = event.nativeEvent;
+      if (crossedHapticThreshold(lastRef.current, translationX)) {
+        Haptics.selectionAsync();
+      }
+      lastRef.current = translationX;
+      translation.setValue(translationX);
+    };
+
+    const onHandlerStateChange = (event: PanGestureHandlerStateChangeEvent) => {
+      if (event.nativeEvent.state !== State.END) return;
+      if (isAnimatingOut.current) return;
+
+      const { translationX, velocityX } = event.nativeEvent;
+      const direction = resolveSwipe(translationX, velocityX);
+
+      if (direction === 'none') {
+        Animated.spring(translation, {
+          toValue: 0,
+          useNativeDriver: true,
+          bounciness: 8,
+        }).start(() => {
+          lastRef.current = 0;
+        });
+        return;
+      }
+
+      isAnimatingOut.current = true;
+      const finalX = commitTranslation(direction);
+      Animated.timing(translation, {
+        toValue: finalX,
+        duration: 180,
+        useNativeDriver: true,
+      }).start(() => {
+        const { winner, loser } = resolveCardChoice(card, direction);
+        translationA.setValue(0);
+        translationB.setValue(0);
+        lastTranslationA.current = 0;
+        lastTranslationB.current = 0;
+        isAnimatingOut.current = false;
+        handleChoice(winner, loser);
+      });
+    };
+
+    return { onGestureEvent, onHandlerStateChange };
+  };
+
+  const gestureA = makePanGestureHandler('A');
+  const gestureB = makePanGestureHandler('B');
+
+  const cardAStyle = {
+    transform: [{ translateX: translationA }],
+    opacity: translationA.interpolate({
+      inputRange: [-SWIPE_THRESHOLD * 2, 0, SWIPE_THRESHOLD * 2],
+      outputRange: [0.6, 1, 0.6],
+      extrapolate: 'clamp' as const,
+    }),
+  };
+  const cardBStyle = {
+    transform: [{ translateX: translationB }],
+    opacity: translationB.interpolate({
+      inputRange: [-SWIPE_THRESHOLD * 2, 0, SWIPE_THRESHOLD * 2],
+      outputRange: [0.6, 1, 0.6],
+      extrapolate: 'clamp' as const,
+    }),
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -586,26 +687,44 @@ export default function RankScreen() {
       <Text style={styles.question}>Which do you prefer?</Text>
 
       <View style={styles.cardsContainer}>
-        <TouchableOpacity
-          style={styles.card}
-          onPress={() => handleChoice(aIdx, bIdx)}
-          activeOpacity={0.8}
+        <PanGestureHandler
+          onGestureEvent={gestureA.onGestureEvent}
+          onHandlerStateChange={gestureA.onHandlerStateChange}
+          activeOffsetX={[-10, 10]}
         >
-          <Text style={styles.cardText}>{itemA.name}</Text>
-        </TouchableOpacity>
+          <Animated.View style={[styles.card, cardAStyle]}>
+            <TouchableOpacity
+              style={styles.cardInner}
+              onPress={() => handleChoice(aIdx, bIdx)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.cardText}>{itemA.name}</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </PanGestureHandler>
 
         <View style={styles.vsContainer}>
           <Text style={styles.vsText}>VS</Text>
         </View>
 
-        <TouchableOpacity
-          style={styles.card}
-          onPress={() => handleChoice(bIdx, aIdx)}
-          activeOpacity={0.8}
+        <PanGestureHandler
+          onGestureEvent={gestureB.onGestureEvent}
+          onHandlerStateChange={gestureB.onHandlerStateChange}
+          activeOffsetX={[-10, 10]}
         >
-          <Text style={styles.cardText}>{itemB.name}</Text>
-        </TouchableOpacity>
+          <Animated.View style={[styles.card, cardBStyle]}>
+            <TouchableOpacity
+              style={styles.cardInner}
+              onPress={() => handleChoice(bIdx, aIdx)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.cardText}>{itemB.name}</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </PanGestureHandler>
       </View>
+
+      <Text style={styles.hintText}>Tap or swipe →  pick   •   swipe ←  other</Text>
 
       <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
         <Text style={styles.skipText}>Can't decide? Skip this one</Text>
@@ -720,14 +839,24 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
     borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 3,
+  },
+  cardInner: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    borderRadius: 16,
+  },
+  hintText: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    textAlign: 'center',
+    marginTop: 8,
   },
   cardText: {
     fontSize: 20,
