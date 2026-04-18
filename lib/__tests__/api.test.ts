@@ -19,6 +19,9 @@ jest.mock('../supabase', () => ({
       getUser: jest.fn(),
     },
     from: jest.fn(),
+    functions: {
+      invoke: jest.fn(),
+    },
   },
 }));
 
@@ -42,6 +45,7 @@ import {
   updateRankedItem,
   incrementComparisonsCount,
   markRankingComplete,
+  markRankingCompleteAndNotify,
   recordComparison,
   getFeaturedLists,
   duplicateList,
@@ -615,6 +619,72 @@ describe('API Module', () => {
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
         await expect(markRankingComplete('ranking-123')).rejects.toEqual({ message: 'Update failed' });
+      });
+    });
+
+    describe('completing a ranking with notification', () => {
+      it('should mark complete and invoke notify edge function', async () => {
+        const chain = {
+          update: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        (mockSupabase.auth.getUser as jest.Mock).mockResolvedValue({
+          data: { user: { id: 'user-123' } },
+        });
+        const invoke = (mockSupabase as any).functions.invoke as jest.Mock;
+        invoke.mockResolvedValue({ data: null, error: null });
+
+        await markRankingCompleteAndNotify('ranking-1', 'list-1');
+
+        expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ is_complete: true }));
+        expect(invoke).toHaveBeenCalledWith('notify-ranking-complete', {
+          body: { rankingId: 'ranking-1', listId: 'list-1', rankerId: 'user-123' },
+        });
+      });
+
+      it('should pass null rankerId when no user is signed in', async () => {
+        const chain = {
+          update: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        (mockSupabase.auth.getUser as jest.Mock).mockResolvedValue({
+          data: { user: null },
+        });
+        const invoke = (mockSupabase as any).functions.invoke as jest.Mock;
+        invoke.mockResolvedValue({ data: null, error: null });
+
+        await markRankingCompleteAndNotify('ranking-2', 'list-2');
+
+        expect(invoke).toHaveBeenCalledWith('notify-ranking-complete', {
+          body: { rankingId: 'ranking-2', listId: 'list-2', rankerId: null },
+        });
+      });
+
+      it('should not throw if the notify function invocation fails', async () => {
+        const chain = {
+          update: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        (mockSupabase.auth.getUser as jest.Mock).mockResolvedValue({
+          data: { user: { id: 'user-123' } },
+        });
+        const invoke = (mockSupabase as any).functions.invoke as jest.Mock;
+        invoke.mockRejectedValue(new Error('network down'));
+
+        await expect(markRankingCompleteAndNotify('ranking-3', 'list-3')).resolves.toBeUndefined();
+      });
+
+      it('should propagate errors from the underlying markRankingComplete update', async () => {
+        const chain = {
+          update: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ error: { message: 'DB down' } }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await expect(markRankingCompleteAndNotify('ranking-4', 'list-4')).rejects.toEqual({ message: 'DB down' });
       });
     });
   });
