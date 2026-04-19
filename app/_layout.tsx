@@ -3,8 +3,17 @@ import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as Linking from 'expo-linking';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { AuthProvider } from '../lib/auth-context';
+import { AuthProvider, useAuth } from '../lib/auth-context';
 import { parseDeepLink, getRouteForDeepLink } from '../lib/deep-linking';
+import {
+  configureNotificationHandler,
+  registerDeviceForUser,
+  subscribeToNotificationTaps,
+} from '../lib/notifications';
+
+// Configure foreground handler once at module load — must be set before any
+// notification is received.
+configureNotificationHandler();
 
 function useDeepLinkHandler() {
   useEffect(() => {
@@ -32,12 +41,33 @@ function useDeepLinkHandler() {
   }, []);
 }
 
+function NotificationBridge() {
+  const { user } = useAuth();
+
+  // Subscribe to notification taps for the lifetime of the app.
+  useEffect(() => {
+    const unsubscribe = subscribeToNotificationTaps();
+    return unsubscribe;
+  }, []);
+
+  // Register this device for the signed-in user so the backend can target them.
+  useEffect(() => {
+    if (!user) return;
+    registerDeviceForUser(user.id).catch(() => {
+      // Permission denied / simulator / offline — nothing user-facing to do.
+    });
+  }, [user?.id]);
+
+  return null;
+}
+
 export default function RootLayout() {
   useDeepLinkHandler();
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AuthProvider>
+        <NotificationBridge />
         <StatusBar style="dark" />
         <Stack
           screenOptions={{

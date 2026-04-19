@@ -426,13 +426,47 @@ export async function incrementComparisonsCount(rankingId: string): Promise<void
 export async function markRankingComplete(rankingId: string): Promise<void> {
   const { error } = await supabase
     .from('rankings')
-    .update({ 
+    .update({
       is_complete: true,
       updated_at: new Date().toISOString(),
     })
     .eq('id', rankingId);
 
   if (error) throw error;
+}
+
+/**
+ * Mark a ranking complete and notify the list creator that someone finished
+ * ranking their list. Calls a Supabase Edge Function (`notify-ranking-complete`)
+ * which is responsible for looking up push tokens and dispatching via Expo's
+ * push service.
+ *
+ * The notification send is best-effort: a failure here must NOT prevent the
+ * ranking from being marked complete, since that's the user-visible action.
+ */
+export async function markRankingCompleteAndNotify(
+  rankingId: string,
+  listId: string
+): Promise<void> {
+  await markRankingComplete(rankingId);
+
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    // SECURITY: rankerId is sent as a convenience hint only. The edge function
+    // MUST derive the authoritative ranker identity from auth.uid() on the
+    // verified JWT — never trust this client-supplied value for authorization
+    // or for deciding whose contacts to notify.
+    await supabase.functions.invoke('notify-ranking-complete', {
+      body: {
+        rankingId,
+        listId,
+        rankerId: user?.id ?? null,
+      },
+    });
+  } catch {
+    // Swallow — the ranking is already marked complete and notifications are
+    // not worth failing the user flow over.
+  }
 }
 
 export async function recordComparison(

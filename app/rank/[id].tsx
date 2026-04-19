@@ -28,6 +28,7 @@ import {
   updateRankedItem,
   incrementComparisonsCount,
   markRankingComplete,
+  markRankingCompleteAndNotify,
   recordComparison,
   addListItem,
   deleteListItem,
@@ -282,7 +283,11 @@ export default function RankScreen() {
 
       if (!useOfflineMode && rankingId) {
         try {
-          await markRankingComplete(rankingId);
+          if (listId) {
+            await markRankingCompleteAndNotify(rankingId, listId);
+          } else {
+            await markRankingComplete(rankingId);
+          }
         } catch (error) {
           console.error('Failed to mark complete:', error);
         }

@@ -20,6 +20,7 @@ module.exports = {
     'lib/templates.ts',
     'lib/partial-ranking.ts',
     'lib/swipe-gesture.ts',
+    'lib/notifications.ts',
   ],
   coverageThreshold: {
     global: {
