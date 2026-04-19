@@ -19,6 +19,7 @@ module.exports = {
     'lib/deep-linking.ts',
     'lib/templates.ts',
     'lib/partial-ranking.ts',
+    'lib/swipe-gesture.ts',
   ],
   coverageThreshold: {
     global: {
