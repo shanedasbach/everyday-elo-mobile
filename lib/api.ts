@@ -452,6 +452,10 @@ export async function markRankingCompleteAndNotify(
 
   try {
     const { data: { user } } = await supabase.auth.getUser();
+    // SECURITY: rankerId is sent as a convenience hint only. The edge function
+    // MUST derive the authoritative ranker identity from auth.uid() on the
+    // verified JWT — never trust this client-supplied value for authorization
+    // or for deciding whose contacts to notify.
     await supabase.functions.invoke('notify-ranking-complete', {
       body: {
         rankingId,

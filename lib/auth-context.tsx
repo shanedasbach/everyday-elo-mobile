@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+import { registerForPushNotificationsAsync, removePushToken } from './notifications';
 
 interface AuthContextType {
   user: User | null;
@@ -46,6 +47,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
+    // Best-effort: unregister this device's push token so the backend stops
+    // targeting it after sign-out. Failures here must not block sign-out.
+    try {
+      const token = await registerForPushNotificationsAsync();
+      if (token) await removePushToken(token);
+    } catch {
+      // Non-fatal — proceed with sign-out regardless.
+    }
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   };
