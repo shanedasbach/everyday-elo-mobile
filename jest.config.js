@@ -12,6 +12,8 @@ module.exports = {
   },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   testMatch: ['**/lib/__tests__/**/*.test.ts'],
+  testPathIgnorePatterns: ['/node_modules/', '<rootDir>/.claude/'],
+  modulePathIgnorePatterns: ['<rootDir>/.claude/'],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   collectCoverageFrom: [
     'lib/elo.ts',
