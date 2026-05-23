@@ -25,10 +25,18 @@ jest.mock('../supabase', () => ({
   },
 }));
 
+// Mock expo-crypto so tests run outside a native runtime. Default returns
+// deterministic bytes; individual tests override via mockImplementationOnce.
+jest.mock('expo-crypto', () => ({
+  getRandomBytes: jest.fn((n: number) => new Uint8Array(n).fill(0xff)),
+}));
+
 const mockSupabase = supabase as jest.Mocked<typeof supabase>;
 
+import * as Crypto from 'expo-crypto';
 import {
   createList,
+  generateShareCode,
   getList,
   getListByShareCode,
   getUserLists,
@@ -141,6 +149,105 @@ describe('API Module', () => {
       await expect(createList({ title: 'Test' })).rejects.toEqual({
         message: 'Database connection failed',
       });
+    });
+
+    it('should retry with a new share_code on unique-violation and succeed', async () => {
+      // First insert collides (Postgres 23505), second succeeds. The two
+      // generateShareCode calls must produce different codes.
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes
+        .mockImplementationOnce(() => new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00]))
+        .mockImplementationOnce(() => new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
+
+      const successList = {
+        id: 'list-retry',
+        title: 'Retry List',
+        creator_id: 'user-123',
+        share_code: 'ZZZZZZZZ',
+        is_private: false,
+        is_template: false,
+        created_at: '',
+        updated_at: '',
+      };
+
+      const insertedCodes: string[] = [];
+      let attempt = 0;
+      const chain: any = {
+        select: jest.fn().mockReturnThis(),
+        insert: jest.fn((row: { share_code: string }) => {
+          insertedCodes.push(row.share_code);
+          return chain;
+        }),
+        single: jest.fn().mockImplementation(() => {
+          attempt++;
+          if (attempt === 1) {
+            return Promise.resolve({ data: null, error: { code: '23505', message: 'duplicate key' } });
+          }
+          return Promise.resolve({ data: successList, error: null });
+        }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      const result = await createList({ title: 'Retry List' });
+
+      expect(result.id).toBe('list-retry');
+      expect(insertedCodes).toHaveLength(2);
+      expect(insertedCodes[0]).not.toBe(insertedCodes[1]);
+    });
+
+    it('should throw after exhausting share_code retry attempts', async () => {
+      const chain: any = {
+        select: jest.fn().mockReturnThis(),
+        insert: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({
+          data: null,
+          error: { code: '23505', message: 'duplicate key' },
+        }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await expect(createList({ title: 'Never Lucky' })).rejects.toEqual({
+        code: '23505',
+        message: 'duplicate key',
+      });
+      // Three attempts before giving up.
+      expect(chain.single).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ============================================
+  // Share Code Generation
+  // ============================================
+  describe('generateShareCode', () => {
+    afterEach(() => {
+      (Crypto.getRandomBytes as jest.Mock).mockReset();
+      // Restore the default deterministic mock so unrelated tests are unaffected.
+      (Crypto.getRandomBytes as jest.Mock).mockImplementation(
+        (n: number) => new Uint8Array(n).fill(0xff)
+      );
+    });
+
+    it('should produce an 8-character code using the share-code alphabet', () => {
+      const code = generateShareCode();
+      expect(code).toHaveLength(8);
+      expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]+$/);
+    });
+
+    it('should source entropy from expo-crypto (not Math.random)', () => {
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes.mockClear();
+      generateShareCode();
+      expect(getRandomBytes).toHaveBeenCalledWith(5);
+    });
+
+    it('should return different codes for different random bytes', () => {
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes
+        .mockImplementationOnce(() => new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00]))
+        .mockImplementationOnce(() => new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
+      const a = generateShareCode();
+      const b = generateShareCode();
+      expect(a).not.toBe(b);
     });
   });
 

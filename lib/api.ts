@@ -1,3 +1,4 @@
+import * as Crypto from 'expo-crypto';
 import { supabase } from './supabase';
 
 // Types
@@ -48,10 +49,38 @@ export interface ListWithStatus extends List {
   estimatedComparisons: number;
 }
 
-// Generate random ID
+// Generate random ID (used for non-public identifiers like anonymous session_id)
 function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
+
+// Crockford-style base32 alphabet (no I/L/O/U — visually unambiguous and URL-safe).
+const SHARE_CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const SHARE_CODE_LENGTH = 8;
+
+/**
+ * Generate a cryptographically random 8-character share code. 5 random bytes
+ * (40 bits) → 8 base32 characters, well above brute-force range.
+ */
+export function generateShareCode(): string {
+  const bytes = Crypto.getRandomBytes(5);
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += SHARE_CODE_ALPHABET[(value >>> bits) & 0x1f];
+    }
+  }
+  return out.slice(0, SHARE_CODE_LENGTH);
+}
+
+const SHARE_CODE_MAX_ATTEMPTS = 3;
+// Postgres unique_violation; surfaced by PostgREST via the `code` field.
+const PG_UNIQUE_VIOLATION = '23505';
 
 // ============================================
 // LISTS
@@ -64,22 +93,27 @@ export async function createList(data: {
   is_private?: boolean;
 }): Promise<List> {
   const { data: { user } } = await supabase.auth.getUser();
-  
-  const { data: list, error } = await supabase
-    .from('lists')
-    .insert({
-      title: data.title,
-      description: data.description,
-      comparison_prompt: data.comparison_prompt,
-      creator_id: user?.id,
-      is_private: data.is_private || false,
-      share_code: generateId().slice(0, 8),
-    })
-    .select()
-    .single();
 
-  if (error) throw error;
-  return list;
+  let lastError: any = null;
+  for (let attempt = 0; attempt < SHARE_CODE_MAX_ATTEMPTS; attempt++) {
+    const { data: list, error } = await supabase
+      .from('lists')
+      .insert({
+        title: data.title,
+        description: data.description,
+        comparison_prompt: data.comparison_prompt,
+        creator_id: user?.id,
+        is_private: data.is_private || false,
+        share_code: generateShareCode(),
+      })
+      .select()
+      .single();
+
+    if (!error) return list;
+    lastError = error;
+    if (error.code !== PG_UNIQUE_VIOLATION) throw error;
+  }
+  throw lastError;
 }
 
 export async function getList(id: string): Promise<List | null> {
