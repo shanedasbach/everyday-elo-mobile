@@ -810,6 +810,37 @@ describe('API Module', () => {
     });
 
     describe('featured lists', () => {
+      // Builds a mock where the first call to from() returns the featured-list
+      // chain, and subsequent calls return the batched-count chain. Counts the
+      // total number of `from()` invocations so we can assert it stays constant.
+      const setupFeaturedMock = (
+        featuredData: any,
+        featuredError: any,
+        itemRows: Array<{ list_id: string }> = [],
+        rankingRows: Array<{ list_id: string }> = [],
+      ) => {
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featuredData, error: featuredError }),
+        };
+        const itemsChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: itemRows, error: null }),
+        };
+        const rankingsChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: rankingRows, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return itemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`Unexpected table: ${table}`);
+        });
+        return { featuredChain, itemsChain, rankingsChain };
+      };
+
       it('should return featured lists with metadata', async () => {
         const featured = [
           {
@@ -823,24 +854,25 @@ describe('API Module', () => {
             },
           },
         ];
-
-        let callCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            callCount++;
-            if (callCount === 1) return Promise.resolve({ data: featured, error: null });
-            return Promise.resolve({ count: 5, error: null });
-          }),
-          eq: jest.fn().mockReturnThis(),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(
+          featured,
+          null,
+          [{ list_id: 'list-1' }, { list_id: 'list-1' }, { list_id: 'list-1' }],
+          [{ list_id: 'list-1' }, { list_id: 'list-1' }],
+        );
 
         const result = await getFeaturedLists();
 
-        expect(Array.isArray(result)).toBe(true);
-        expect(result.length).toBeGreaterThanOrEqual(0);
+        expect(result).toHaveLength(1);
+        expect(result[0]).toEqual({
+          id: 'f1',
+          list_id: 'list-1',
+          featured_at: '2024-01-01T00:00:00Z',
+          title: 'Top 10 Pizzas',
+          description: 'The best pizzas',
+          item_count: 3,
+          ranking_count: 2,
+        });
       });
 
       it('should skip items with null lists property', async () => {
@@ -849,7 +881,7 @@ describe('API Module', () => {
             id: 'f1',
             list_id: 'list-1',
             featured_at: '2024-01-01T00:00:00Z',
-            lists: null, // No associated list
+            lists: null,
           },
           {
             id: 'f2',
@@ -862,33 +894,17 @@ describe('API Module', () => {
             },
           },
         ];
-
-        let callCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            callCount++;
-            if (callCount === 1) return Promise.resolve({ data: featured, error: null });
-            return Promise.resolve({ count: 3, error: null });
-          }),
-          eq: jest.fn().mockReturnThis(),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(featured, null, [{ list_id: 'list-2' }], []);
 
         const result = await getFeaturedLists();
 
-        // Should only have 1 result (the one with valid lists)
-        expect(result.length).toBeLessThanOrEqual(1);
+        expect(result).toHaveLength(1);
+        expect(result[0].list_id).toBe('list-2');
+        expect(result[0].item_count).toBe(1);
       });
 
       it('should handle empty data array', async () => {
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: [], error: null }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock([], null);
 
         const result = await getFeaturedLists();
 
@@ -896,12 +912,7 @@ describe('API Module', () => {
       });
 
       it('should handle null data', async () => {
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: null, error: null }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(null, null);
 
         const result = await getFeaturedLists();
 
@@ -909,16 +920,103 @@ describe('API Module', () => {
       });
 
       it('should return empty array on error', async () => {
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: null, error: { message: 'Error' } }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(null, { message: 'Error' });
 
         const result = await getFeaturedLists();
 
         expect(result).toEqual([]);
+      });
+
+      it('should default missing counts to 0 when a list has no items or rankings', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Empty', description: '' },
+          },
+        ];
+        // Both batched queries return empty arrays for this list_id
+        setupFeaturedMock(featured, null, [], []);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].item_count).toBe(0);
+        expect(result[0].ranking_count).toBe(0);
+      });
+
+      it('should treat null data from batched count queries as zero', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List', description: '' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        // Both batched queries return data: null (not an empty array)
+        const itemsChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: null, error: null }),
+        };
+        const rankingsChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: null, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return itemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`Unexpected table: ${table}`);
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].item_count).toBe(0);
+        expect(result[0].ranking_count).toBe(0);
+      });
+
+      // Acceptance criteria: query count must be constant regardless of N.
+      const expectConstantQueryCount = async (n: number) => {
+        const featured = Array.from({ length: n }, (_, i) => ({
+          id: `f${i}`,
+          list_id: `list-${i}`,
+          featured_at: '2024-01-01T00:00:00Z',
+          lists: { id: `list-${i}`, title: `List ${i}`, description: '' },
+        }));
+        // Give every list one item and one ranking
+        const itemRows = featured.map((f) => ({ list_id: f.list_id }));
+        const rankingRows = featured.map((f) => ({ list_id: f.list_id }));
+        setupFeaturedMock(featured, null, itemRows, rankingRows);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(n);
+        // Exactly 3 calls: featured_lists, list_items, rankings — regardless of N
+        expect(mockSupabase.from).toHaveBeenCalledTimes(3);
+        expect(mockSupabase.from).toHaveBeenCalledWith('featured_lists');
+        expect(mockSupabase.from).toHaveBeenCalledWith('list_items');
+        expect(mockSupabase.from).toHaveBeenCalledWith('rankings');
+        // Counts should match
+        result.forEach((r) => {
+          expect(r.item_count).toBe(1);
+          expect(r.ranking_count).toBe(1);
+        });
+      };
+
+      it('should issue exactly 3 queries regardless of result size (N=5)', async () => {
+        await expectConstantQueryCount(5);
+      });
+
+      it('should issue exactly 3 queries regardless of result size (N=20)', async () => {
+        await expectConstantQueryCount(20);
       });
     });
   });

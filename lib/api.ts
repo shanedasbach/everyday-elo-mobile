@@ -200,36 +200,42 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     return [];
   }
 
-  // Transform the data
-  const featured: FeaturedList[] = [];
-  for (const item of data || []) {
-    const list = item.lists as any;
-    if (!list) continue;
+  const validRows = (data || []).filter((row) => (row as any).lists);
+  if (validRows.length === 0) return [];
 
-    // Get item count
-    const { count: itemCount } = await supabase
-      .from('list_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('list_id', list.id);
+  const listIds = validRows.map((row) => ((row as any).lists as any).id);
 
-    // Get ranking count
-    const { count: rankingCount } = await supabase
-      .from('rankings')
-      .select('id', { count: 'exact', head: true })
-      .eq('list_id', list.id);
+  // Batch-fetch all list_id values in a single query per table, then count in JS.
+  // Keeps total round-trips constant (1 featured + 1 items + 1 rankings) regardless of N.
+  const [itemsRes, rankingsRes] = await Promise.all([
+    supabase.from('list_items').select('list_id').in('list_id', listIds),
+    supabase.from('rankings').select('list_id').in('list_id', listIds),
+  ]);
 
-    featured.push({
-      id: item.id,
-      list_id: list.id,
-      featured_at: item.featured_at,
-      title: list.title,
-      description: list.description,
-      item_count: itemCount || 0,
-      ranking_count: rankingCount || 0,
-    });
+  const itemCounts = new Map<string, number>();
+  for (const row of itemsRes.data || []) {
+    const id = (row as any).list_id;
+    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
   }
 
-  return featured;
+  const rankingCounts = new Map<string, number>();
+  for (const row of rankingsRes.data || []) {
+    const id = (row as any).list_id;
+    rankingCounts.set(id, (rankingCounts.get(id) || 0) + 1);
+  }
+
+  return validRows.map((row) => {
+    const list = (row as any).lists as any;
+    return {
+      id: (row as any).id,
+      list_id: list.id,
+      featured_at: (row as any).featured_at,
+      title: list.title,
+      description: list.description,
+      item_count: itemCounts.get(list.id) || 0,
+      ranking_count: rankingCounts.get(list.id) || 0,
+    };
+  });
 }
 
 export async function deleteList(id: string): Promise<void> {
