@@ -48,6 +48,25 @@ export interface ListWithStatus extends List {
   estimatedComparisons: number;
 }
 
+export interface Profile {
+  id: string;
+  name: string;
+  username?: string;
+  avatar_url?: string;
+}
+
+export interface FollowedListFeedEntry {
+  ranking_id: string;
+  list_id: string;
+  title: string;
+  description?: string;
+  creator_id: string;
+  creator_name?: string;
+  creator_username?: string;
+  ranked_at: string;
+  comparisons_count: number;
+}
+
 // Generate random ID
 function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
@@ -513,4 +532,154 @@ export async function duplicateList(sourceListId: string): Promise<List> {
   }
 
   return newList;
+}
+
+// ============================================
+// SOCIAL: FOLLOWS
+// ============================================
+// Mirrors the web app store API (everyday-elo/src/lib/store/index.ts) against
+// the shared `follows` table. RLS enforces that only the authenticated user
+// can create/delete rows where follower_id = auth.uid().
+
+export async function followUser(followerId: string, followingId: string): Promise<void> {
+  if (followerId === followingId) {
+    throw new Error('Cannot follow yourself');
+  }
+
+  const { error } = await supabase
+    .from('follows')
+    .insert({ follower_id: followerId, following_id: followingId });
+
+  if (error) throw error;
+}
+
+export async function unfollowUser(followerId: string, followingId: string): Promise<void> {
+  const { error } = await supabase
+    .from('follows')
+    .delete()
+    .eq('follower_id', followerId)
+    .eq('following_id', followingId);
+
+  if (error) throw error;
+}
+
+export async function isFollowing(followerId: string, followingId: string): Promise<boolean> {
+  const { count } = await supabase
+    .from('follows')
+    .select('*', { count: 'exact', head: true })
+    .eq('follower_id', followerId)
+    .eq('following_id', followingId);
+
+  return (count ?? 0) > 0;
+}
+
+export async function getFollowing(userId: string): Promise<Profile[]> {
+  const { data, error } = await supabase
+    .from('follows')
+    .select('following_id, profiles!follows_following_id_fkey(id, name, username, avatar_url)')
+    .eq('follower_id', userId);
+
+  if (error) throw error;
+
+  return (data || []).map((row: any) => ({
+    id: row.profiles.id,
+    name: row.profiles.name || '',
+    username: row.profiles.username,
+    avatar_url: row.profiles.avatar_url,
+  }));
+}
+
+export async function getFollowers(userId: string): Promise<Profile[]> {
+  const { data, error } = await supabase
+    .from('follows')
+    .select('follower_id, profiles!follows_follower_id_fkey(id, name, username, avatar_url)')
+    .eq('following_id', userId);
+
+  if (error) throw error;
+
+  return (data || []).map((row: any) => ({
+    id: row.profiles.id,
+    name: row.profiles.name || '',
+    username: row.profiles.username,
+    avatar_url: row.profiles.avatar_url,
+  }));
+}
+
+export async function getFollowingCount(userId: string): Promise<number> {
+  const { count } = await supabase
+    .from('follows')
+    .select('*', { count: 'exact', head: true })
+    .eq('follower_id', userId);
+
+  return count ?? 0;
+}
+
+export async function getFollowerCount(userId: string): Promise<number> {
+  const { count } = await supabase
+    .from('follows')
+    .select('*', { count: 'exact', head: true })
+    .eq('following_id', userId);
+
+  return count ?? 0;
+}
+
+// ============================================
+// SOCIAL: FOLLOWED LISTS FEED
+// ============================================
+
+/**
+ * Recent completed rankings made by people the user follows, on lists that
+ * are public (not private, not templates). Powers the "Following" tab on the
+ * browse screen.
+ *
+ * Two round-trips: one to read the follow graph, one to fetch enriched
+ * ranking rows with their list and creator. Skips the second query entirely
+ * when the user follows nobody.
+ */
+export async function getFollowedListsFeed(
+  userId: string,
+  limit = 20,
+  offset = 0
+): Promise<FollowedListFeedEntry[]> {
+  const { data: followData, error: followError } = await supabase
+    .from('follows')
+    .select('following_id')
+    .eq('follower_id', userId);
+
+  if (followError) throw followError;
+
+  const followingIds = (followData || []).map((f: any) => f.following_id);
+  if (followingIds.length === 0) return [];
+
+  const { data: rankings, error: rankingsError } = await supabase
+    .from('rankings')
+    .select(`
+      id,
+      list_id,
+      user_id,
+      comparisons_count,
+      updated_at,
+      lists!inner(id, title, description, creator_id, is_private, is_template),
+      profiles!rankings_user_id_fkey(id, name, username)
+    `)
+    .in('user_id', followingIds)
+    .eq('is_complete', true)
+    .eq('lists.is_private', false)
+    .eq('lists.is_template', false)
+    .order('updated_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (rankingsError) throw rankingsError;
+
+  return (rankings || []).map((r: any) => ({
+    ranking_id: r.id,
+    list_id: r.list_id,
+    title: r.lists?.title || '',
+    description: r.lists?.description || undefined,
+    creator_id: r.lists?.creator_id || '',
+    creator_name: r.profiles?.name || undefined,
+    creator_username: r.profiles?.username || undefined,
+    ranked_at: r.updated_at,
+    comparisons_count: r.comparisons_count ?? 0,
+  }));
 }
