@@ -19,6 +19,7 @@ jest.mock('../supabase', () => ({
       getUser: jest.fn(),
     },
     from: jest.fn(),
+    rpc: jest.fn(),
     functions: {
       invoke: jest.fn(),
     },
@@ -739,31 +740,32 @@ describe('API Module', () => {
   // USE CASE 6: Incrementing Comparison Count
   // ============================================
   describe('Incrementing Comparison Count', () => {
-    it('should increment count when ranking exists', async () => {
-      const chain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: { comparisons_count: 5 } }),
-      };
-      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+    it('should call the increment_comparisons_count RPC with the ranking id', async () => {
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
       await incrementComparisonsCount('ranking-1');
 
-      expect(chain.update).toHaveBeenCalled();
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
+      expect(mockSupabase.rpc).toHaveBeenCalledWith('increment_comparisons_count', {
+        p_ranking_id: 'ranking-1',
+      });
+      // No table-level read or update — the RPC does both atomically server-side.
+      expect(mockSupabase.from).not.toHaveBeenCalled();
     });
 
-    it('should handle missing ranking gracefully', async () => {
-      const chain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: null }),
-      };
-      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+    it('should resolve when the ranking does not exist (RPC is idempotent)', async () => {
+      // A missing ranking is not an error from the RPC's perspective — the
+      // UPDATE simply affects zero rows. We still expect the helper to resolve.
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
-      // Should not throw, just not update
       await expect(incrementComparisonsCount('nonexistent')).resolves.toBeUndefined();
+    });
+
+    it('should surface RPC errors instead of swallowing them', async () => {
+      const rpcError = { message: 'RLS denied', code: '42501' };
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: rpcError });
+
+      await expect(incrementComparisonsCount('ranking-1')).rejects.toEqual(rpcError);
     });
   });
 
