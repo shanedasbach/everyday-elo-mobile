@@ -117,43 +117,55 @@ export async function getUserLists(userId: string): Promise<List[]> {
 
 export async function getUserListsWithStatus(userId: string): Promise<ListWithStatus[]> {
   const lists = await getUserLists(userId);
-  const listsWithStatus: ListWithStatus[] = [];
+  if (lists.length === 0) return [];
 
-  for (const list of lists) {
-    const items = await getListItems(list.id);
-    const itemCount = items.length;
-    
-    // Get user's ranking for this list
-    const { data: ranking } = await supabase
+  const listIds = lists.map((l) => l.id);
+
+  // Batch-fetch items and rankings for all lists in two queries, regardless of N.
+  // Total round-trips: 1 lists + 1 items + 1 rankings.
+  const [itemsRes, rankingsRes] = await Promise.all([
+    supabase.from('list_items').select('list_id').in('list_id', listIds),
+    supabase
       .from('rankings')
-      .select('*')
-      .eq('list_id', list.id)
-      .eq('user_id', userId)
-      .single();
+      .select('list_id, comparisons_count, is_complete')
+      .in('list_id', listIds)
+      .eq('user_id', userId),
+  ]);
 
+  const itemCounts = new Map<string, number>();
+  for (const row of itemsRes.data || []) {
+    const id = (row as any).list_id;
+    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
+  }
+
+  const rankingsByList = new Map<string, { comparisons_count: number; is_complete: boolean }>();
+  for (const row of rankingsRes.data || []) {
+    const id = (row as any).list_id;
+    rankingsByList.set(id, {
+      comparisons_count: (row as any).comparisons_count,
+      is_complete: (row as any).is_complete,
+    });
+  }
+
+  return lists.map((list) => {
+    const itemCount = itemCounts.get(list.id) || 0;
+    const ranking = rankingsByList.get(list.id);
     let status: 'not_started' | 'in_progress' | 'completed' = 'not_started';
     let comparisonsCount = 0;
-    const estimatedComparisons = itemCount * 2;
 
     if (ranking) {
       comparisonsCount = ranking.comparisons_count;
-      if (ranking.is_complete) {
-        status = 'completed';
-      } else {
-        status = 'in_progress';
-      }
+      status = ranking.is_complete ? 'completed' : 'in_progress';
     }
 
-    listsWithStatus.push({
+    return {
       ...list,
       itemCount,
       rankingStatus: status,
       comparisonsCount,
-      estimatedComparisons,
-    });
-  }
-
-  return listsWithStatus;
+      estimatedComparisons: itemCount * 2,
+    };
+  });
 }
 
 export async function getTemplateLists(): Promise<List[]> {
