@@ -459,6 +459,92 @@ describe('API Module', () => {
 
         expect(result.id).toBe('ranking-new');
         expect(result.comparisons_count).toBe(0);
+        // Exactly two inserts: one for the ranking row, one batched ranked_items
+        expect(chain.insert).toHaveBeenCalledTimes(2);
+        expect(chain.insert).toHaveBeenNthCalledWith(2, [
+          { ranking_id: 'ranking-new', item_id: 'item-1', rating: 1500, comparisons: 0 },
+          { ranking_id: 'ranking-new', item_id: 'item-2', rating: 1500, comparisons: 0 },
+        ]);
+      });
+
+      it('should skip ranked_items insert when list has no items', async () => {
+        const newRanking = {
+          id: 'ranking-empty',
+          list_id: 'list-empty',
+          user_id: 'user-1',
+          is_complete: false,
+          comparisons_count: 0,
+          created_at: '',
+          updated_at: '',
+        };
+
+        let singleCalls = 0;
+        const chain = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockResolvedValue({ data: [], error: null }),
+          single: jest.fn().mockImplementation(() => {
+            singleCalls++;
+            if (singleCalls === 1) {
+              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
+            }
+            return Promise.resolve({ data: newRanking, error: null });
+          }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await createRanking('list-empty', 'user-1');
+
+        // Only the ranking insert — no empty-array round-trip for ranked_items
+        expect(chain.insert).toHaveBeenCalledTimes(1);
+      });
+
+      it('should throw when ranked_items batch insert fails', async () => {
+        const newRanking = {
+          id: 'ranking-new',
+          list_id: 'list-1',
+          user_id: 'user-1',
+          is_complete: false,
+          comparisons_count: 0,
+          created_at: '',
+          updated_at: '',
+        };
+        const listItems = [{ id: 'item-1', display_order: 0 }];
+
+        let singleCalls = 0;
+        let insertCalls = 0;
+        const chain: {
+          select: jest.Mock;
+          insert: jest.Mock;
+          eq: jest.Mock;
+          order: jest.Mock;
+          single: jest.Mock;
+        } = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockResolvedValue({ data: listItems, error: null }),
+          single: jest.fn().mockImplementation(() => {
+            singleCalls++;
+            if (singleCalls === 1) {
+              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
+            }
+            return Promise.resolve({ data: newRanking, error: null });
+          }),
+        };
+        chain.insert.mockImplementation(() => {
+          insertCalls++;
+          // First insert is the ranking row (chained: .insert().select().single())
+          // Second insert is the awaited batched ranked_items insert
+          if (insertCalls === 2) {
+            return Promise.resolve({ error: { message: 'Batch insert failed' } });
+          }
+          return chain;
+        });
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await expect(createRanking('list-1', 'user-1')).rejects.toEqual({ message: 'Batch insert failed' });
       });
 
       it('should allow anonymous rankings (no user ID)', async () => {

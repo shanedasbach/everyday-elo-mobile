@@ -332,13 +332,15 @@ export async function createRanking(listId: string, userId?: string): Promise<Ra
 
   // Initialize ranked items
   const items = await getListItems(listId);
-  for (const item of items) {
-    await supabase.from('ranked_items').insert({
+  if (items.length > 0) {
+    const rows = items.map((item) => ({
       ranking_id: ranking.id,
       item_id: item.id,
       rating: 1500,
       comparisons: 0,
-    });
+    }));
+    const { error: insertError } = await supabase.from('ranked_items').insert(rows);
+    if (insertError) throw insertError;
   }
 
   return ranking;
