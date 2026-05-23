@@ -282,12 +282,30 @@ export async function addListItem(listId: string, name: string): Promise<ListIte
 }
 
 export async function addListItems(listId: string, names: string[]): Promise<ListItem[]> {
-  const items: ListItem[] = [];
-  for (let i = 0; i < names.length; i++) {
-    const item = await addListItem(listId, names[i]);
-    items.push(item);
-  }
-  return items;
+  if (names.length === 0) return [];
+
+  const { data: existing } = await supabase
+    .from('list_items')
+    .select('display_order')
+    .eq('list_id', listId)
+    .order('display_order', { ascending: false })
+    .limit(1);
+
+  const maxOrder = existing?.[0]?.display_order ?? -1;
+
+  const rows = names.map((name, i) => ({
+    list_id: listId,
+    name,
+    display_order: maxOrder + 1 + i,
+  }));
+
+  const { data, error } = await supabase
+    .from('list_items')
+    .insert(rows)
+    .select();
+
+  if (error) throw error;
+  return data || [];
 }
 
 export async function deleteListItem(id: string): Promise<void> {
