@@ -11,7 +11,7 @@ module.exports = {
     }],
   },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
-  testMatch: ['**/lib/__tests__/**/*.test.ts'],
+  testMatch: ['**/lib/__tests__/**/*.test.(ts|tsx)'],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   collectCoverageFrom: [
     'lib/elo.ts',
@@ -21,6 +21,8 @@ module.exports = {
     'lib/partial-ranking.ts',
     'lib/swipe-gesture.ts',
     'lib/notifications.ts',
+    'lib/auth-context.tsx',
+    'lib/supabase.ts',
   ],
   coverageThreshold: {
     global: {
