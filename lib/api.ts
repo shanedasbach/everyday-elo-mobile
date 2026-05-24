@@ -487,6 +487,31 @@ export async function recordComparison(
   if (error) throw error;
 }
 
+export interface PersistComparisonArgs {
+  rankingId: string;
+  winnerRankedItemId: string;
+  winnerItemId: string;
+  winnerRating: number;
+  winnerComparisons: number;
+  loserRankedItemId: string;
+  loserItemId: string;
+  loserRating: number;
+  loserComparisons: number;
+}
+
+// Persist all four writes for a single comparison in parallel. Each write
+// targets a different row or table, so there is no ordering dependency —
+// running them sequentially (as the call site used to) stacked ~4x the
+// background latency on the hot path.
+export async function persistComparison(args: PersistComparisonArgs): Promise<void> {
+  await Promise.all([
+    updateRankedItem(args.winnerRankedItemId, args.winnerRating, args.winnerComparisons),
+    updateRankedItem(args.loserRankedItemId, args.loserRating, args.loserComparisons),
+    incrementComparisonsCount(args.rankingId),
+    recordComparison(args.rankingId, args.winnerItemId, args.loserItemId, args.winnerItemId),
+  ]);
+}
+
 // ============================================
 // DUPLICATE LIST
 // ============================================

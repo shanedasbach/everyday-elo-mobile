@@ -47,6 +47,7 @@ import {
   markRankingComplete,
   markRankingCompleteAndNotify,
   recordComparison,
+  persistComparison,
   getFeaturedLists,
   duplicateList,
   List,
@@ -764,6 +765,160 @@ describe('API Module', () => {
 
       // Should not throw, just not update
       await expect(incrementComparisonsCount('nonexistent')).resolves.toBeUndefined();
+    });
+  });
+
+  // ============================================
+  // USE CASE 6b: Persisting a full comparison (4 parallel writes)
+  // ============================================
+  describe('Persisting a full comparison', () => {
+    const args = {
+      rankingId: 'ranking-1',
+      winnerRankedItemId: 'ri-winner',
+      winnerItemId: 'item-winner',
+      winnerRating: 1520,
+      winnerComparisons: 3,
+      loserRankedItemId: 'ri-loser',
+      loserItemId: 'item-loser',
+      loserRating: 1480,
+      loserComparisons: 2,
+    };
+
+    const buildTableMocks = () => {
+      const rankedItemsChain = {
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: null }),
+      };
+      const rankingsChain = {
+        select: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({ data: { comparisons_count: 5 } }),
+      };
+      const comparisonsChain = {
+        insert: jest.fn().mockResolvedValue({ error: null }),
+      };
+      (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+        if (table === 'ranked_items') return rankedItemsChain;
+        if (table === 'rankings') return rankingsChain;
+        if (table === 'comparisons') return comparisonsChain;
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      return { rankedItemsChain, rankingsChain, comparisonsChain };
+    };
+
+    it('invokes all four underlying writes per comparison', async () => {
+      const { rankedItemsChain, rankingsChain, comparisonsChain } = buildTableMocks();
+
+      await persistComparison(args);
+
+      // Two updateRankedItem calls — one per item
+      expect(rankedItemsChain.update).toHaveBeenCalledTimes(2);
+      expect(rankedItemsChain.update).toHaveBeenCalledWith({
+        rating: args.winnerRating,
+        comparisons: args.winnerComparisons,
+      });
+      expect(rankedItemsChain.update).toHaveBeenCalledWith({
+        rating: args.loserRating,
+        comparisons: args.loserComparisons,
+      });
+
+      // incrementComparisonsCount touched rankings
+      expect(rankingsChain.update).toHaveBeenCalled();
+
+      // recordComparison inserted into comparisons with winner == winner.itemId
+      expect(comparisonsChain.insert).toHaveBeenCalledWith({
+        ranking_id: args.rankingId,
+        item_a_id: args.winnerItemId,
+        item_b_id: args.loserItemId,
+        winner_id: args.winnerItemId,
+      });
+    });
+
+    it('issues the writes in parallel (all dispatched before any awaits resolve)', async () => {
+      const dispatchOrder: string[] = [];
+
+      // Block all four supabase calls on a single deferred promise. If
+      // persistComparison ran them serially, only the first call would land
+      // before we resolve — so the test fails. Parallel dispatch lands all
+      // four before resolve(), proving they were issued concurrently.
+      let release!: () => void;
+      const gate = new Promise<{ error: null }>(resolve => {
+        release = () => resolve({ error: null });
+      });
+
+      const rankedItemsChain = {
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockImplementation(() => {
+          dispatchOrder.push('ranked_items.update');
+          return gate;
+        }),
+      };
+      const rankingsChain = {
+        select: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        single: jest.fn().mockImplementation(() => {
+          dispatchOrder.push('rankings.select.single');
+          return Promise.resolve({ data: { comparisons_count: 5 } });
+        }),
+      };
+      const comparisonsChain = {
+        insert: jest.fn().mockImplementation(() => {
+          dispatchOrder.push('comparisons.insert');
+          return gate;
+        }),
+      };
+      (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+        if (table === 'ranked_items') return rankedItemsChain;
+        if (table === 'rankings') return rankingsChain;
+        if (table === 'comparisons') return comparisonsChain;
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      const pending = persistComparison(args);
+
+      // Drain microtasks so all parallel dispatches land before we release the gate.
+      await new Promise(setImmediate);
+
+      // Both updateRankedItem dispatches + recordComparison dispatch fired
+      // before any await resolved — they would not all be present here under
+      // sequential awaits.
+      expect(dispatchOrder).toEqual(
+        expect.arrayContaining([
+          'ranked_items.update',
+          'ranked_items.update',
+          'comparisons.insert',
+        ])
+      );
+      expect(dispatchOrder.filter(s => s === 'ranked_items.update')).toHaveLength(2);
+
+      release();
+      await pending;
+    });
+
+    it('rejects if any underlying write fails', async () => {
+      const rankedItemsChain = {
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: null }),
+      };
+      const rankingsChain = {
+        select: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({ data: { comparisons_count: 5 } }),
+      };
+      const comparisonsChain = {
+        insert: jest.fn().mockResolvedValue({ error: { message: 'insert failed' } }),
+      };
+      (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+        if (table === 'ranked_items') return rankedItemsChain;
+        if (table === 'rankings') return rankingsChain;
+        if (table === 'comparisons') return comparisonsChain;
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      await expect(persistComparison(args)).rejects.toEqual({ message: 'insert failed' });
     });
   });
 

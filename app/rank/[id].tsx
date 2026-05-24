@@ -26,10 +26,9 @@ import {
   createRanking,
   getRankedItems,
   updateRankedItem,
-  incrementComparisonsCount,
   markRankingComplete,
   markRankingCompleteAndNotify,
-  recordComparison,
+  persistComparison,
   addListItem,
   deleteListItem,
   List,
@@ -250,10 +249,17 @@ export default function RankScreen() {
     // Update Supabase if online
     if (!useOfflineMode && rankingId) {
       try {
-        await updateRankedItem(winner.id, newWinnerRating, winner.comparisons + 1);
-        await updateRankedItem(loser.id, newLoserRating, loser.comparisons + 1);
-        await incrementComparisonsCount(rankingId);
-        await recordComparison(rankingId, winner.itemId, loser.itemId, winner.itemId);
+        await persistComparison({
+          rankingId,
+          winnerRankedItemId: winner.id,
+          winnerItemId: winner.itemId,
+          winnerRating: newWinnerRating,
+          winnerComparisons: winner.comparisons + 1,
+          loserRankedItemId: loser.id,
+          loserItemId: loser.itemId,
+          loserRating: newLoserRating,
+          loserComparisons: loser.comparisons + 1,
+        });
       } catch (error) {
         console.error('Failed to save comparison:', error);
       }
