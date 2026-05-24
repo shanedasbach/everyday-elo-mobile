@@ -70,6 +70,7 @@ describe('API Module', () => {
       delete: jest.fn().mockReturnThis(),
       eq: jest.fn().mockReturnThis(),
       single: jest.fn().mockResolvedValue(result),
+      maybeSingle: jest.fn().mockResolvedValue(result),
       order: jest.fn().mockResolvedValue(result),
       limit: jest.fn().mockResolvedValue(result),
     };
@@ -171,11 +172,17 @@ describe('API Module', () => {
       });
 
       it('should return null when list does not exist', async () => {
-        mockQuery({ data: null, error: { code: 'PGRST116' } });
+        mockQuery({ data: null, error: null });
 
         const result = await getList('nonexistent-id');
 
         expect(result).toBeNull();
+      });
+
+      it('should throw on real database error (not no-rows)', async () => {
+        mockQuery({ data: null, error: { message: 'RLS denied' } });
+
+        await expect(getList('list-1')).rejects.toEqual({ message: 'RLS denied' });
       });
     });
 
@@ -189,11 +196,17 @@ describe('API Module', () => {
       });
 
       it('should return null for invalid share code', async () => {
-        mockQuery({ data: null, error: { code: 'PGRST116' } });
+        mockQuery({ data: null, error: null });
 
         const result = await getListByShareCode('invalid-code');
 
         expect(result).toBeNull();
+      });
+
+      it('should throw on real database error (not no-rows)', async () => {
+        mockQuery({ data: null, error: { message: 'Network down' } });
+
+        await expect(getListByShareCode('share123')).rejects.toEqual({ message: 'Network down' });
       });
     });
   });
@@ -435,23 +448,13 @@ describe('API Module', () => {
           { id: 'item-2', display_order: 1 },
         ];
 
-        let singleCalls = 0;
-        let orderCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            orderCalls++;
-            return Promise.resolve({ data: listItems, error: null });
-          }),
-          single: jest.fn().mockImplementation(() => {
-            singleCalls++;
-            if (singleCalls === 1) {
-              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
-            }
-            return Promise.resolve({ data: newRanking, error: null });
-          }),
+          order: jest.fn().mockResolvedValue({ data: listItems, error: null }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          single: jest.fn().mockResolvedValue({ data: newRanking, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -479,6 +482,7 @@ describe('API Module', () => {
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockResolvedValue({ data: [], error: null }),
           single: jest.fn().mockResolvedValue({ data: anonRanking, error: null }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -488,23 +492,31 @@ describe('API Module', () => {
       });
 
       it('should throw error when ranking insert fails', async () => {
-        let singleCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockResolvedValue({ data: [], error: null }),
-          single: jest.fn().mockImplementation(() => {
-            singleCalls++;
-            if (singleCalls === 1) {
-              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
-            }
-            return Promise.resolve({ data: null, error: { message: 'Insert failed' } });
-          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          single: jest.fn().mockResolvedValue({ data: null, error: { message: 'Insert failed' } }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
         await expect(createRanking('list-1', 'user-1')).rejects.toEqual({ message: 'Insert failed' });
+      });
+
+      it('should throw when existing-ranking check hits a real error (not no-rows)', async () => {
+        const chain = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockResolvedValue({ data: [], error: null }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } }),
+          single: jest.fn().mockResolvedValue({ data: null, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await expect(createRanking('list-1', 'user-1')).rejects.toEqual({ message: 'RLS denied' });
       });
     });
 
@@ -525,11 +537,17 @@ describe('API Module', () => {
       });
 
       it('should return null when not found', async () => {
-        mockQuery({ data: null, error: { code: 'PGRST116' } });
+        mockQuery({ data: null, error: null });
 
         const result = await getRanking('nonexistent');
 
         expect(result).toBeNull();
+      });
+
+      it('should throw on real database error (not no-rows)', async () => {
+        mockQuery({ data: null, error: { message: 'DB error' } });
+
+        await expect(getRanking('r1')).rejects.toEqual({ message: 'DB error' });
       });
     });
 
@@ -978,7 +996,7 @@ describe('API Module', () => {
             if (queryCount === 1) return Promise.resolve({ data: lists });
             return Promise.resolve({ data: items });
           }),
-          single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -1002,7 +1020,7 @@ describe('API Module', () => {
             if (queryCount === 1) return Promise.resolve({ data: lists });
             return Promise.resolve({ data: items });
           }),
-          single: jest.fn().mockResolvedValue({ data: ranking }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: ranking, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -1026,7 +1044,7 @@ describe('API Module', () => {
             if (queryCount === 1) return Promise.resolve({ data: lists });
             return Promise.resolve({ data: items });
           }),
-          single: jest.fn().mockResolvedValue({ data: ranking }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: ranking, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -1048,7 +1066,7 @@ describe('API Module', () => {
             if (queryCount === 1) return Promise.resolve({ data: lists });
             return Promise.resolve({ data: items });
           }),
-          single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -1056,6 +1074,26 @@ describe('API Module', () => {
 
         // 5 items * 2 = 10 estimated comparisons
         expect(result[0].estimatedComparisons).toBe(10);
+      });
+
+      it('should throw when the ranking lookup hits a real error', async () => {
+        const lists = [{ id: 'l1', title: 'Boom' }];
+        const items = [{ id: 'i1' }];
+
+        let queryCount = 0;
+        const chain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockImplementation(() => {
+            queryCount++;
+            if (queryCount === 1) return Promise.resolve({ data: lists });
+            return Promise.resolve({ data: items });
+          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await expect(getUserListsWithStatus('user-1')).rejects.toEqual({ message: 'RLS denied' });
       });
     });
   });
@@ -1201,16 +1239,14 @@ describe('API Module', () => {
 
     it('should duplicate a list with items', async () => {
       // duplicateList makes these sequential from() calls:
-      // 0: getList         → from('lists').select().eq().single()
+      // 0: getList         → from('lists').select().eq().maybeSingle()
       // 1: getListItems    → from('list_items').select().eq().order()  [terminal]
       // 2: createList      → from('lists').insert().select().single()
       // 3,5: addListItem order-check → from('list_items').select().eq().order().limit() [terminal]
       // 4,6: addListItem insert      → from('list_items').insert().select().single()
       let callIndex = 0;
-      let limitCallIndex = 0;
       let singleCallIndex = 0;
       const singleResults = [
-        { data: sourceList, error: null },   // getList
         { data: copiedList, error: null },   // createList
         { data: sourceItems[0], error: null }, // addListItem item 1 insert
         { data: sourceItems[1], error: null }, // addListItem item 2 insert
@@ -1223,10 +1259,8 @@ describe('API Module', () => {
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            limitCallIndex++;
-            return Promise.resolve({ data: [] }); // no existing items for order check
-          }),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
           single: jest.fn().mockImplementation(() => {
             const result = singleResults[singleCallIndex];
             singleCallIndex++;
@@ -1251,7 +1285,6 @@ describe('API Module', () => {
       let callIndex = 0;
       let singleCallIndex = 0;
       const singleResults = [
-        { data: sourceList, error: null },   // getList
         { data: copiedList, error: null },   // createList
       ];
 
@@ -1263,6 +1296,7 @@ describe('API Module', () => {
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockResolvedValue({ data: [] }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
           single: jest.fn().mockImplementation(() => {
             const result = singleResults[singleCallIndex];
             singleCallIndex++;
@@ -1284,7 +1318,7 @@ describe('API Module', () => {
       (mockSupabase.from as jest.Mock).mockImplementation(() => ({
         select: jest.fn().mockReturnThis(),
         eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+        maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
       }));
 
       await expect(duplicateList('nonexistent')).rejects.toThrow('Source list not found');

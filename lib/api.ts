@@ -87,9 +87,9 @@ export async function getList(id: string): Promise<List | null> {
     .from('lists')
     .select('*')
     .eq('id', id)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -98,9 +98,9 @@ export async function getListByShareCode(code: string): Promise<List | null> {
     .from('lists')
     .select('*')
     .eq('share_code', code)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -124,12 +124,14 @@ export async function getUserListsWithStatus(userId: string): Promise<ListWithSt
     const itemCount = items.length;
     
     // Get user's ranking for this list
-    const { data: ranking } = await supabase
+    const { data: ranking, error: rankingError } = await supabase
       .from('rankings')
       .select('*')
       .eq('list_id', list.id)
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
+
+    if (rankingError) throw rankingError;
 
     let status: 'not_started' | 'in_progress' | 'completed' = 'not_started';
     let comparisonsCount = 0;
@@ -306,13 +308,14 @@ export async function deleteListItem(id: string): Promise<void> {
 export async function createRanking(listId: string, userId?: string): Promise<Ranking> {
   // Check for existing ranking
   if (userId) {
-    const { data: existing } = await supabase
+    const { data: existing, error: existingError } = await supabase
       .from('rankings')
       .select('*')
       .eq('list_id', listId)
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
 
+    if (existingError) throw existingError;
     if (existing) return existing;
   }
 
@@ -349,9 +352,9 @@ export async function getRanking(id: string): Promise<Ranking | null> {
     .from('rankings')
     .select('*')
     .eq('id', id)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -361,9 +364,9 @@ export async function getUserRankingForList(listId: string, userId: string): Pro
     .select('*')
     .eq('list_id', listId)
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -375,9 +378,9 @@ export async function getCompletedRankingForList(listId: string): Promise<Rankin
     .eq('is_complete', true)
     .order('updated_at', { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
