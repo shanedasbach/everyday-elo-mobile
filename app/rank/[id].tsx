@@ -732,7 +732,7 @@ export default function RankScreen() {
       <Text style={styles.hintText}>Tap or swipe →  pick   •   swipe ←  other</Text>
 
       <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
-        <Text style={styles.skipText}>Can't decide? Skip this one</Text>
+        <Text style={styles.skipText}>Can&apos;t decide? Skip this one</Text>
       </TouchableOpacity>
     </SafeAreaView>
   );

@@ -260,7 +260,7 @@ export default function ListDetailScreen() {
         <View style={styles.emptyState}>
           <Text style={styles.emptyEmoji}>🔍</Text>
           <Text style={styles.emptyTitle}>List not found</Text>
-          <Text style={styles.emptyText}>This list may have been deleted or doesn't exist.</Text>
+          <Text style={styles.emptyText}>This list may have been deleted or doesn&apos;t exist.</Text>
         </View>
       </SafeAreaView>
     );
