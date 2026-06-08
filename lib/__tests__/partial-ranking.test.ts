@@ -2,12 +2,22 @@
  * Tests for partial ranking persistence (save & exit flow for offline/template rankings).
  */
 
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  __esModule: true,
+  default: {
+    setItem: jest.fn(),
+    getItem: jest.fn(),
+    removeItem: jest.fn(),
+  },
+}));
+
 jest.mock('expo-secure-store', () => ({
   setItemAsync: jest.fn(),
   getItemAsync: jest.fn(),
   deleteItemAsync: jest.fn(),
 }));
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import {
   savePartialRanking,
@@ -17,26 +27,37 @@ import {
   PartialRankedItem,
 } from '../partial-ranking';
 
-const mockStore = SecureStore as jest.Mocked<typeof SecureStore>;
+const mockAsync = AsyncStorage as jest.Mocked<typeof AsyncStorage>;
+const mockSecure = SecureStore as jest.Mocked<typeof SecureStore>;
 
 const sampleItems: PartialRankedItem[] = [
   { itemId: 'a', name: 'Alpha', rating: 1520, comparisons: 2 },
   { itemId: 'b', name: 'Bravo', rating: 1480, comparisons: 2 },
 ];
 
+/** Drive getPartialRanking by stubbing the AsyncStorage value it reads. */
+function storedInAsync(value: string | null) {
+  mockAsync.getItem.mockResolvedValue(value);
+}
+
 describe('partial-ranking', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Default: empty stores. Individual tests override as needed.
+    mockAsync.getItem.mockResolvedValue(null);
+    mockAsync.setItem.mockResolvedValue(undefined);
+    mockAsync.removeItem.mockResolvedValue(undefined);
+    mockSecure.getItemAsync.mockResolvedValue(null);
+    mockSecure.deleteItemAsync.mockResolvedValue(undefined);
   });
 
   describe('savePartialRanking', () => {
-    it('writes a versioned payload under a namespaced key', async () => {
-      mockStore.setItemAsync.mockResolvedValue(undefined);
-
+    it('writes a versioned payload to AsyncStorage under a namespaced key', async () => {
       await savePartialRanking('movies', sampleItems, 4);
 
-      expect(mockStore.setItemAsync).toHaveBeenCalledTimes(1);
-      const [key, value] = mockStore.setItemAsync.mock.calls[0];
+      expect(mockAsync.setItem).toHaveBeenCalledTimes(1);
+      expect(mockSecure.setItemAsync).not.toHaveBeenCalled();
+      const [key, value] = mockAsync.setItem.mock.calls[0];
       expect(key).toBe('partial_ranking_movies');
       const parsed = JSON.parse(value);
       expect(parsed.version).toBe(1);
@@ -50,13 +71,12 @@ describe('partial-ranking', () => {
 
   describe('getPartialRanking', () => {
     it('returns null when nothing is stored', async () => {
-      mockStore.getItemAsync.mockResolvedValue(null);
       const result = await getPartialRanking('movies');
       expect(result).toBeNull();
     });
 
     it('returns the parsed payload when present and valid', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -70,46 +90,48 @@ describe('partial-ranking', () => {
       expect(result).not.toBeNull();
       expect(result?.comparisons).toBe(3);
       expect(result?.items).toEqual(sampleItems);
+      // A valid AsyncStorage hit must not touch SecureStore.
+      expect(mockSecure.getItemAsync).not.toHaveBeenCalled();
     });
 
     it('returns null when the payload is not valid JSON', async () => {
-      mockStore.getItemAsync.mockResolvedValue('not-json');
+      storedInAsync('not-json');
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when the stored version is not supported', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({ version: 99, listId: 'movies', comparisons: 1, items: [] })
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when the stored listId does not match', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({ version: 1, listId: 'pizza', comparisons: 1, items: [] })
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when items field is malformed', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({ version: 1, listId: 'movies', comparisons: 1, items: 'nope' })
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when the root payload is not an object', async () => {
-      mockStore.getItemAsync.mockResolvedValue('"just a string"');
+      storedInAsync('"just a string"');
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when the root payload is JSON null', async () => {
-      mockStore.getItemAsync.mockResolvedValue('null');
+      storedInAsync('null');
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when comparisons is not a number', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -122,7 +144,7 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when comparisons is negative', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -138,14 +160,14 @@ describe('partial-ranking', () => {
       // JSON can't express NaN/Infinity literals, but very large exponents
       // (1e999) parse as Infinity — use that to hit the finite guard without
       // bypassing JSON.parse.
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         '{"version":1,"listId":"movies","comparisons":1e999,"items":[],"updatedAt":"2026-04-10T00:00:00.000Z"}'
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when updatedAt is missing', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -157,7 +179,7 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when an item is missing required fields', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -170,14 +192,12 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when an item has wrong field types', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
           comparisons: 2,
-          items: [
-            { itemId: 'a', name: 'Alpha', rating: '1520', comparisons: 2 },
-          ],
+          items: [{ itemId: 'a', name: 'Alpha', rating: '1520', comparisons: 2 }],
           updatedAt: '2026-04-10T00:00:00.000Z',
         })
       );
@@ -185,14 +205,12 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when an item has negative comparisons', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
           comparisons: 2,
-          items: [
-            { itemId: 'a', name: 'Alpha', rating: 1520, comparisons: -1 },
-          ],
+          items: [{ itemId: 'a', name: 'Alpha', rating: 1520, comparisons: -1 }],
           updatedAt: '2026-04-10T00:00:00.000Z',
         })
       );
@@ -201,14 +219,14 @@ describe('partial-ranking', () => {
 
     it('returns null when an item has a non-finite rating', async () => {
       // 1e999 parses to Infinity via valid JSON, exercising the finite guard.
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         '{"version":1,"listId":"movies","comparisons":2,"items":[{"itemId":"a","name":"Alpha","rating":1e999,"comparisons":2}],"updatedAt":"2026-04-10T00:00:00.000Z"}'
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when an item entry is null', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -219,19 +237,95 @@ describe('partial-ranking', () => {
       );
       expect(await getPartialRanking('movies')).toBeNull();
     });
+
+    it('round-trips a large payload that would exceed SecureStore 2KB ceiling', async () => {
+      // Simulate AsyncStorage so save and get share one backing store.
+      const backing = new Map<string, string>();
+      mockAsync.setItem.mockImplementation(async (k: string, v: string) => {
+        backing.set(k, v);
+      });
+      mockAsync.getItem.mockImplementation(async (k: string) => backing.get(k) ?? null);
+
+      const bigItems: PartialRankedItem[] = Array.from({ length: 200 }, (_, i) => ({
+        itemId: `item-${i}`,
+        name: `A fairly long contender name number ${i} with extra padding`,
+        rating: 1500 + i,
+        comparisons: i % 7,
+      }));
+
+      await savePartialRanking('huge-list', bigItems, 350);
+
+      const stored = backing.get('partial_ranking_huge-list')!;
+      expect(stored.length).toBeGreaterThan(2048); // exceeds SecureStore's limit
+
+      const result = await getPartialRanking('huge-list');
+      expect(result?.items).toHaveLength(200);
+      expect(result?.items).toEqual(bigItems);
+      expect(result?.comparisons).toBe(350);
+    });
+  });
+
+  describe('legacy SecureStore migration', () => {
+    const legacyPayload = JSON.stringify({
+      version: 1,
+      listId: 'movies',
+      comparisons: 5,
+      items: sampleItems,
+      updatedAt: '2026-04-10T00:00:00.000Z',
+    });
+
+    it('reads through to a legacy SecureStore entry and migrates it forward', async () => {
+      mockAsync.getItem.mockResolvedValue(null);
+      mockSecure.getItemAsync.mockResolvedValue(legacyPayload);
+
+      const result = await getPartialRanking('movies');
+
+      expect(result?.comparisons).toBe(5);
+      expect(result?.items).toEqual(sampleItems);
+      // Migrated into AsyncStorage and deleted from SecureStore.
+      expect(mockAsync.setItem).toHaveBeenCalledWith(
+        'partial_ranking_movies',
+        legacyPayload
+      );
+      expect(mockSecure.deleteItemAsync).toHaveBeenCalledWith('partial_ranking_movies');
+    });
+
+    it('ignores an invalid legacy SecureStore entry without migrating it', async () => {
+      mockAsync.getItem.mockResolvedValue(null);
+      mockSecure.getItemAsync.mockResolvedValue('garbage');
+
+      expect(await getPartialRanking('movies')).toBeNull();
+      expect(mockAsync.setItem).not.toHaveBeenCalled();
+      expect(mockSecure.deleteItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('does not consult SecureStore when AsyncStorage already has a valid entry', async () => {
+      storedInAsync(legacyPayload);
+      mockSecure.getItemAsync.mockResolvedValue(legacyPayload);
+
+      await getPartialRanking('movies');
+      expect(mockSecure.getItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('returns null when a legacy SecureStore read throws', async () => {
+      mockAsync.getItem.mockResolvedValue(null);
+      mockSecure.getItemAsync.mockRejectedValue(new Error('keystore unavailable'));
+
+      expect(await getPartialRanking('movies')).toBeNull();
+    });
   });
 
   describe('clearPartialRanking', () => {
-    it('deletes the stored entry for the given list', async () => {
-      mockStore.deleteItemAsync.mockResolvedValue(undefined);
+    it('removes the entry from AsyncStorage and any legacy SecureStore copy', async () => {
       await clearPartialRanking('movies');
-      expect(mockStore.deleteItemAsync).toHaveBeenCalledWith('partial_ranking_movies');
+      expect(mockAsync.removeItem).toHaveBeenCalledWith('partial_ranking_movies');
+      expect(mockSecure.deleteItemAsync).toHaveBeenCalledWith('partial_ranking_movies');
     });
   });
 
   describe('hasPartialRanking', () => {
     it('is true when a saved ranking has at least one comparison', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -244,7 +338,7 @@ describe('partial-ranking', () => {
     });
 
     it('is false when a saved ranking has zero comparisons', async () => {
-      mockStore.getItemAsync.mockResolvedValue(
+      storedInAsync(
         JSON.stringify({
           version: 1,
           listId: 'movies',
@@ -257,7 +351,6 @@ describe('partial-ranking', () => {
     });
 
     it('is false when nothing is stored', async () => {
-      mockStore.getItemAsync.mockResolvedValue(null);
       expect(await hasPartialRanking('movies')).toBe(false);
     });
   });

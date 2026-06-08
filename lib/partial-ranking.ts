@@ -3,9 +3,16 @@
  *
  * Supabase-backed rankings save automatically after each comparison, but
  * template rankings ran purely in-memory and were lost on exit. This module
- * stores partial progress in SecureStore so users can save & exit and resume
- * later from where they left off.
+ * stores partial progress so users can save & exit and resume later from where
+ * they left off.
+ *
+ * Storage uses AsyncStorage rather than SecureStore: partial-ranking data is
+ * non-sensitive and a large list (many items, long names) can exceed
+ * SecureStore's ~2KB Android value-size ceiling, silently failing the save.
+ * AsyncStorage has no such limit. Earlier builds wrote to SecureStore, so reads
+ * fall through to it once and migrate the entry forward.
  */
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
 const KEY_PREFIX = 'partial_ranking_';
@@ -42,7 +49,7 @@ export async function savePartialRanking(
     items,
     updatedAt: new Date().toISOString(),
   };
-  await SecureStore.setItemAsync(keyFor(listId), JSON.stringify(payload));
+  await AsyncStorage.setItem(keyFor(listId), JSON.stringify(payload));
 }
 
 function isValidPartialItem(value: unknown): value is PartialRankedItem {
@@ -59,10 +66,10 @@ function isValidPartialItem(value: unknown): value is PartialRankedItem {
   );
 }
 
-export async function getPartialRanking(
+function parsePartialRanking(
+  raw: string | null,
   listId: string
-): Promise<PartialRanking | null> {
-  const raw = await SecureStore.getItemAsync(keyFor(listId));
+): PartialRanking | null {
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -88,8 +95,57 @@ export async function getPartialRanking(
   }
 }
 
+/**
+ * Read any legacy SecureStore entry, migrate a valid one into AsyncStorage,
+ * and remove it from SecureStore so the migration runs at most once.
+ */
+async function migrateFromSecureStore(
+  listId: string
+): Promise<PartialRanking | null> {
+  let legacyRaw: string | null;
+  try {
+    legacyRaw = await SecureStore.getItemAsync(keyFor(listId));
+  } catch {
+    return null;
+  }
+  const legacy = parsePartialRanking(legacyRaw, listId);
+  if (!legacy) return null;
+  // Carry the entry forward to AsyncStorage; clear the old copy regardless of
+  // whether the write succeeds so a wedged SecureStore value isn't read forever.
+  try {
+    await AsyncStorage.setItem(keyFor(listId), legacyRaw as string);
+  } catch {
+    // If the forward-write fails, still return the parsed value so the caller
+    // can resume; the next save will re-persist it.
+  }
+  try {
+    await SecureStore.deleteItemAsync(keyFor(listId));
+  } catch {
+    // Best effort — a failed delete just means we re-migrate next time.
+  }
+  return legacy;
+}
+
+export async function getPartialRanking(
+  listId: string
+): Promise<PartialRanking | null> {
+  const raw = await AsyncStorage.getItem(keyFor(listId));
+  const current = parsePartialRanking(raw, listId);
+  if (current) return current;
+  // Nothing usable in AsyncStorage — fall through to any legacy SecureStore
+  // entry written by an earlier build and migrate it forward.
+  return migrateFromSecureStore(listId);
+}
+
 export async function clearPartialRanking(listId: string): Promise<void> {
-  await SecureStore.deleteItemAsync(keyFor(listId));
+  await AsyncStorage.removeItem(keyFor(listId));
+  // Also drop any lingering legacy entry so a cleared ranking can't resurrect
+  // from SecureStore on the next read.
+  try {
+    await SecureStore.deleteItemAsync(keyFor(listId));
+  } catch {
+    // Best effort.
+  }
 }
 
 export async function hasPartialRanking(listId: string): Promise<boolean> {
