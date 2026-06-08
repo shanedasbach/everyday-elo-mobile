@@ -19,6 +19,7 @@ import {
   initializeItems,
   getRankedItems,
   selectNextPair,
+  pairKey,
   estimateComparisonsNeeded,
   isRankingStable,
   K_FACTOR,
@@ -427,6 +428,86 @@ describe('ELO Ranking System', () => {
         
         // Should have seen all 3 possible pairs: 1-2, 1-3, 2-3
         expect(seenPairs.size).toBe(3);
+      });
+    });
+
+    describe('avoiding already-seen pairs', () => {
+      it('should not repeat a seen pair when an unseen alternative exists', () => {
+        const items: EloItem[] = [
+          { id: '1', name: 'A', rating: 1500, comparisons: 0 },
+          { id: '2', name: 'B', rating: 1500, comparisons: 1 },
+          { id: '3', name: 'C', rating: 1500, comparisons: 1 },
+        ];
+
+        // A-B already shown. The least-compared item is A (id '1'); its only
+        // unseen opponent is C (id '3'), so the pair must be A-C, never A-B.
+        const seenPairs = new Set<string>([pairKey('1', '2')]);
+
+        for (let i = 0; i < 50; i++) {
+          const pair = selectNextPair(items, seenPairs);
+          const key = pairKey(pair![0].id, pair![1].id);
+          expect(key).not.toBe(pairKey('1', '2'));
+          expect(key).toBe(pairKey('1', '3'));
+        }
+      });
+
+      it('should fall back to a seen pair when all candidates are exhausted', () => {
+        const items: EloItem[] = [
+          { id: '1', name: 'A', rating: 1500, comparisons: 0 },
+          { id: '2', name: 'B', rating: 1500, comparisons: 1 },
+        ];
+
+        // The only possible pair has already been seen — must still return it
+        // rather than null.
+        const seenPairs = new Set<string>([pairKey('1', '2')]);
+        const pair = selectNextPair(items, seenPairs);
+
+        expect(pair).not.toBeNull();
+        expect(pairKey(pair![0].id, pair![1].id)).toBe(pairKey('1', '2'));
+      });
+
+      it('should still prioritize the least-compared item when avoiding seen pairs', () => {
+        const items: EloItem[] = [
+          { id: '1', name: 'Few', rating: 1500, comparisons: 0 },
+          { id: '2', name: 'Many', rating: 1500, comparisons: 9 },
+          { id: '3', name: 'Many', rating: 1500, comparisons: 9 },
+        ];
+
+        // Mark one of the least-compared item's matchups as seen; it must still
+        // be included (paired with its unseen opponent).
+        const seenPairs = new Set<string>([pairKey('1', '2')]);
+
+        for (let i = 0; i < 50; i++) {
+          const pair = selectNextPair(items, seenPairs);
+          expect(pair!.some(p => p.id === '1')).toBe(true);
+          expect(pairKey(pair![0].id, pair![1].id)).toBe(pairKey('1', '3'));
+        }
+      });
+
+      it('should behave like the no-arg version when seen set is empty', () => {
+        const items: EloItem[] = [
+          { id: '1', name: 'A', rating: 1500, comparisons: 0 },
+          { id: '2', name: 'B', rating: 1500, comparisons: 0 },
+        ];
+
+        const pair = selectNextPair(items, new Set());
+        expect(pair).toHaveLength(2);
+        expect(pair![0].id).not.toBe(pair![1].id);
+      });
+    });
+
+    describe('pairKey', () => {
+      it('should be order-independent (A-B === B-A)', () => {
+        expect(pairKey('1', '2')).toBe(pairKey('2', '1'));
+      });
+
+      it('should produce distinct keys for distinct pairs', () => {
+        expect(pairKey('1', '2')).not.toBe(pairKey('1', '3'));
+      });
+
+      it('should handle non-numeric ids deterministically', () => {
+        expect(pairKey('zebra', 'apple')).toBe('apple-zebra');
+        expect(pairKey('apple', 'zebra')).toBe('apple-zebra');
       });
     });
   });

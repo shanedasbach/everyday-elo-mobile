@@ -8,7 +8,7 @@ import {
 } from 'react-native-gesture-handler';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import { expectedScore, K_FACTOR } from '../../lib/elo';
+import { expectedScore, K_FACTOR, pairKey } from '../../lib/elo';
 import {
   SWIPE_THRESHOLD,
   commitTranslation,
@@ -79,6 +79,9 @@ export default function RankScreen() {
   const lastTranslationA = useRef(0);
   const lastTranslationB = useRef(0);
   const isAnimatingOut = useRef(false);
+  // Order-independent keys for pairs already shown this session, so
+  // selectNextPair can avoid surfacing the same matchup repeatedly.
+  const seenPairsRef = useRef(new Set<string>());
 
   useEffect(() => {
     loadList();
@@ -207,8 +210,15 @@ export default function RankScreen() {
       Math.abs(a.rating - first.rating) - Math.abs(b.rating - first.rating)
     );
     
+    // Prefer opponents not yet compared against `first` this session; only fall
+    // back to a previously-seen pair when every alternative is exhausted.
+    const unseen = others.filter(
+      o => !seenPairsRef.current.has(pairKey(first.itemId, o.itemId))
+    );
+    const pool = unseen.length > 0 ? unseen : others;
+
     // Pick from top 3 closest
-    const candidates = others.slice(0, Math.min(3, others.length));
+    const candidates = pool.slice(0, Math.min(3, pool.length));
     const second = candidates[Math.floor(Math.random() * candidates.length)];
     
     // Randomize order
@@ -224,7 +234,11 @@ export default function RankScreen() {
     
     const winner = rankedItems[winnerIdx];
     const loser = rankedItems[loserIdx];
-    
+
+    // Remember this matchup so selectNextPair doesn't surface it again until
+    // every other pairing has been shown.
+    seenPairsRef.current.add(pairKey(winner.itemId, loser.itemId));
+
     const expectedWinner = expectedScore(winner.rating, loser.rating);
     const expectedLoser = expectedScore(loser.rating, winner.rating);
     

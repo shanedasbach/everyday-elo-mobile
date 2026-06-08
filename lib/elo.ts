@@ -100,28 +100,48 @@ export function getRankedItems(items: EloItem[]): EloItem[] {
 }
 
 /**
- * Select next pair to compare
- * Strategy: Prioritize items with fewer comparisons, then similar ratings
+ * Build an order-independent key for a pair of item ids.
+ * pairKey(a, b) === pairKey(b, a)
  */
-export function selectNextPair(items: EloItem[]): [EloItem, EloItem] | null {
+export function pairKey(idA: string, idB: string): string {
+  return idA < idB ? `${idA}-${idB}` : `${idB}-${idA}`;
+}
+
+/**
+ * Select next pair to compare
+ * Strategy: Prioritize items with fewer comparisons, then similar ratings.
+ * When `seenPairs` is provided, prefer opponents not yet compared against the
+ * least-compared item so similarly-rated pairs aren't surfaced repeatedly while
+ * other matchups go unseen. Falls back to a seen pair only when every
+ * alternative has already been shown.
+ */
+export function selectNextPair(
+  items: EloItem[],
+  seenPairs: Set<string> = new Set()
+): [EloItem, EloItem] | null {
   if (items.length < 2) return null;
 
   // Sort by comparisons (ascending) to prioritize less-compared items
   const sorted = [...items].sort((a, b) => a.comparisons - b.comparisons);
-  
+
   // Take the least compared item
   const first = sorted[0];
-  
+
   // Find an opponent with similar rating (for more informative comparisons)
   const others = items.filter((item) => item.id !== first.id);
-  
+
   // Sort others by rating distance from first
-  others.sort((a, b) => 
+  others.sort((a, b) =>
     Math.abs(a.rating - first.rating) - Math.abs(b.rating - first.rating)
   );
-  
+
+  // Prefer opponents not yet compared against `first`; only fall back to the
+  // full set when every candidate has already been seen.
+  const unseen = others.filter((o) => !seenPairs.has(pairKey(first.id, o.id)));
+  const pool = unseen.length > 0 ? unseen : others;
+
   // Pick randomly from top 3 closest (adds variety)
-  const candidates = others.slice(0, Math.min(3, others.length));
+  const candidates = pool.slice(0, Math.min(3, pool.length));
   const second = candidates[Math.floor(Math.random() * candidates.length)];
 
   // Randomize order so there's no position bias
