@@ -4,14 +4,17 @@ module.exports = {
   transform: {
     '^.+\\.(ts|tsx)$': ['ts-jest', {
       tsconfig: {
-        jsx: 'react',
+        jsx: 'react-jsx',
         esModuleInterop: true,
         allowSyntheticDefaultImports: true,
       },
     }],
   },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
-  testMatch: ['**/lib/__tests__/**/*.test.ts'],
+  testMatch: [
+    '**/lib/__tests__/**/*.test.ts',
+    '**/components/__tests__/**/*.test.tsx',
+  ],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   collectCoverageFrom: [
     'lib/elo.ts',
@@ -21,6 +24,7 @@ module.exports = {
     'lib/partial-ranking.ts',
     'lib/swipe-gesture.ts',
     'lib/notifications.ts',
+    'components/*.tsx',
   ],
   coverageThreshold: {
     global: {
