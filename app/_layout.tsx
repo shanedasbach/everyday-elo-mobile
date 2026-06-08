@@ -4,6 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as Linking from 'expo-linking';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AuthProvider, useAuth } from '../lib/auth-context';
+import { RootErrorBoundary } from '../components/RootErrorBoundary';
 import { parseDeepLink, getRouteForDeepLink } from '../lib/deep-linking';
 import {
   configureNotificationHandler,
@@ -66,25 +67,27 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <AuthProvider>
-        <NotificationBridge />
-        <StatusBar style="dark" />
-        <Stack
-          screenOptions={{
-            headerStyle: { backgroundColor: '#fff' },
-            headerTintColor: '#111827',
-            headerTitleStyle: { fontWeight: '600' },
-          }}
-        >
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="(auth)/sign-in" options={{ title: 'Sign In', presentation: 'modal' }} />
-          <Stack.Screen name="(auth)/sign-up" options={{ title: 'Sign Up', presentation: 'modal' }} />
-          <Stack.Screen name="rank/[id]" options={{ headerShown: false }} />
-          <Stack.Screen name="list/[id]" options={{ title: 'List Details' }} />
-          <Stack.Screen name="quick-add" options={{ title: 'Quick Add', presentation: 'modal' }} />
-          <Stack.Screen name="share/[code]" options={{ title: 'Shared Ranking', headerShown: false }} />
-        </Stack>
-      </AuthProvider>
+      <RootErrorBoundary>
+        <AuthProvider>
+          <NotificationBridge />
+          <StatusBar style="dark" />
+          <Stack
+            screenOptions={{
+              headerStyle: { backgroundColor: '#fff' },
+              headerTintColor: '#111827',
+              headerTitleStyle: { fontWeight: '600' },
+            }}
+          >
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="(auth)/sign-in" options={{ title: 'Sign In', presentation: 'modal' }} />
+            <Stack.Screen name="(auth)/sign-up" options={{ title: 'Sign Up', presentation: 'modal' }} />
+            <Stack.Screen name="rank/[id]" options={{ headerShown: false }} />
+            <Stack.Screen name="list/[id]" options={{ title: 'List Details' }} />
+            <Stack.Screen name="quick-add" options={{ title: 'Quick Add', presentation: 'modal' }} />
+            <Stack.Screen name="share/[code]" options={{ title: 'Shared Ranking', headerShown: false }} />
+          </Stack>
+        </AuthProvider>
+      </RootErrorBoundary>
     </GestureHandlerRootView>
   );
 }
