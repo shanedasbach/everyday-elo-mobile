@@ -10,6 +10,11 @@ import {
   registerDeviceForUser,
   subscribeToNotificationTaps,
 } from '../lib/notifications';
+import { initMonitoring } from '../lib/monitoring';
+
+// Initialize crash reporting before anything else runs so early errors are
+// captured. No-ops in development and when no DSN is configured.
+initMonitoring();
 
 // Configure foreground handler once at module load — must be set before any
 // notification is received.

@@ -103,6 +103,7 @@ eas submit --platform android
 |----------|-------------|
 | `EXPO_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Supabase anonymous key |
+| `EXPO_PUBLIC_SENTRY_DSN` | Sentry DSN for crash reporting (optional — unset disables it; also no-ops in dev) |
 
 ## Related
 
