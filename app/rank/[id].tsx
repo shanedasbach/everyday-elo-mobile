@@ -318,7 +318,12 @@ export default function RankScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <Text style={styles.errorText}>List not found</Text>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
           <Text style={styles.backButtonText}>Go Back</Text>
         </TouchableOpacity>
       </SafeAreaView>
@@ -455,12 +460,22 @@ export default function RankScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => router.back()}
+            style={styles.backButton}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+          >
             <Text style={styles.backButtonText}>← Back</Text>
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
           {!useOfflineMode && (
-            <TouchableOpacity onPress={() => setShowAddItem(true)} style={styles.addItemButton}>
+            <TouchableOpacity
+              onPress={() => setShowAddItem(true)}
+              style={styles.addItemButton}
+              accessibilityRole="button"
+              accessibilityLabel="Add item"
+            >
               <Text style={styles.addItemText}>+ Add</Text>
             </TouchableOpacity>
           )}
@@ -474,10 +489,13 @@ export default function RankScreen() {
         
         <ScrollView style={styles.resultsList} contentContainerStyle={styles.resultsContent}>
           {sorted.map((item, index) => (
-            <TouchableOpacity 
-              key={item.id} 
+            <TouchableOpacity
+              key={item.id}
               style={styles.resultItem}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`${item.name}, ranked number ${index + 1}, rating ${item.rating}`}
+              accessibilityHint={useOfflineMode ? undefined : 'Opens actions to boost, demote, or remove this item'}
               onPress={() => {
                 if (!useOfflineMode) {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -660,7 +678,11 @@ export default function RankScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Close ranking"
+        >
           <Text style={styles.closeButton}>✕</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
@@ -668,6 +690,7 @@ export default function RankScreen() {
           <TouchableOpacity
             onPress={handleSaveAndExit}
             style={styles.saveExitButton}
+            accessibilityRole="button"
             accessibilityLabel="Save and exit"
           >
             <Text style={styles.saveExitText}>💾</Text>
@@ -680,7 +703,14 @@ export default function RankScreen() {
       <View style={styles.progressContainer}>
         <View style={styles.progressHeader}>
           <Text style={styles.progressText}>{comparisons} comparisons • ~{Math.max(0, estimated - comparisons)} left</Text>
-          <TouchableOpacity onPress={toggleExpressMode} style={[styles.expressBadge, expressMode && styles.expressBadgeActive]}>
+          <TouchableOpacity
+            onPress={toggleExpressMode}
+            style={[styles.expressBadge, expressMode && styles.expressBadgeActive]}
+            accessibilityRole="button"
+            accessibilityLabel={`Express mode ${expressMode ? 'on' : 'off'}`}
+            accessibilityHint="Toggles faster ranking with fewer comparisons"
+            accessibilityState={{ selected: expressMode }}
+          >
             <Text style={[styles.expressBadgeText, expressMode && styles.expressBadgeTextActive]}>⚡ Express {expressMode ? 'ON' : 'OFF'}</Text>
           </TouchableOpacity>
         </View>
@@ -702,6 +732,8 @@ export default function RankScreen() {
               style={styles.cardInner}
               onPress={() => handleChoice(aIdx, bIdx)}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={`Choose ${itemA.name}`}
             >
               <Text style={styles.cardText}>{itemA.name}</Text>
             </TouchableOpacity>
@@ -722,6 +754,8 @@ export default function RankScreen() {
               style={styles.cardInner}
               onPress={() => handleChoice(bIdx, aIdx)}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={`Choose ${itemB.name}`}
             >
               <Text style={styles.cardText}>{itemB.name}</Text>
             </TouchableOpacity>
@@ -731,7 +765,12 @@ export default function RankScreen() {
 
       <Text style={styles.hintText}>Tap or swipe →  pick   •   swipe ←  other</Text>
 
-      <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
+      <TouchableOpacity
+        onPress={handleSkip}
+        style={styles.skipButton}
+        accessibilityRole="button"
+        accessibilityLabel="Skip this comparison"
+      >
         <Text style={styles.skipText}>Can't decide? Skip this one</Text>
       </TouchableOpacity>
     </SafeAreaView>
