@@ -17,7 +17,15 @@ export default function BrowseScreen() {
     try {
       const supabaseTemplates = await getTemplateLists();
       if (supabaseTemplates.length > 0) {
-        setTemplates(supabaseTemplates as Template[]);
+        setTemplates(
+          supabaseTemplates.map((list) => ({
+            id: list.id,
+            title: list.title,
+            description: list.description,
+            share_code: list.share_code,
+            items: [],
+          })),
+        );
       }
       const featured = await getFeaturedLists();
       setFeaturedLists(featured);
