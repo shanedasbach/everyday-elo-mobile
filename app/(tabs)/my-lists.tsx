@@ -3,6 +3,8 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, RefreshControl, A
 import { Link, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth-context';
 import { getUserListsWithStatus, ListWithStatus, deleteList } from '../../lib/api';
+import { reconcilePartialRankings } from '../../lib/partial-ranking';
+import { templates } from '../../lib/templates';
 
 export default function MyListsScreen() {
   const { user } = useAuth();
@@ -20,6 +22,17 @@ export default function MyListsScreen() {
     try {
       const userLists = await getUserListsWithStatus(user.id);
       setLists(userLists);
+
+      // This is the one place that knows the complete live id set, so it's
+      // where orphaned partial rankings (deleted elsewhere, or written before
+      // the index existed) get reclaimed. Only runs on a successful fetch — a
+      // failed load would look like "no lists" and wipe everything.
+      reconcilePartialRankings([
+        ...userLists.map(l => l.id),
+        ...templates.map(t => t.id),
+      ]).catch(error => {
+        console.error('Failed to reconcile partial rankings:', error);
+      });
     } catch (error) {
       console.error('Failed to load lists:', error);
     } finally {

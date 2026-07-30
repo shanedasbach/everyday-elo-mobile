@@ -25,7 +25,18 @@ jest.mock('../supabase', () => ({
   },
 }));
 
+// Local partial-ranking storage is keychain-backed; stub it so deleteList's
+// cleanup hook is observable without touching SecureStore.
+jest.mock('../partial-ranking', () => ({
+  clearPartialRanking: jest.fn().mockResolvedValue(undefined),
+}));
+
+import { clearPartialRanking } from '../partial-ranking';
+
 const mockSupabase = supabase as jest.Mocked<typeof supabase>;
+const mockClearPartialRanking = clearPartialRanking as jest.MockedFunction<
+  typeof clearPartialRanking
+>;
 
 import {
   createList,
@@ -1083,6 +1094,46 @@ describe('API Module', () => {
       (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
       await expect(deleteList('nonexistent')).rejects.toEqual({ message: 'List not found' });
+    });
+
+    it('should clear the local partial ranking for the deleted list', async () => {
+      const chain = {
+        delete: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: null }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await deleteList('list-123');
+
+      expect(mockClearPartialRanking).toHaveBeenCalledWith('list-123');
+    });
+
+    it('should not clear local storage when the remote delete fails', async () => {
+      const chain = {
+        delete: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: { message: 'List not found' } }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await expect(deleteList('list-123')).rejects.toBeDefined();
+
+      expect(mockClearPartialRanking).not.toHaveBeenCalled();
+    });
+
+    it('should still resolve when clearing local storage fails', async () => {
+      const chain = {
+        delete: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: null }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+      mockClearPartialRanking.mockRejectedValueOnce(new Error('keychain unavailable'));
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      // The remote row is already gone — surfacing the local failure would
+      // wrongly tell the caller the list still exists.
+      await expect(deleteList('list-123')).resolves.toBeUndefined();
+
+      consoleSpy.mockRestore();
     });
   });
 
