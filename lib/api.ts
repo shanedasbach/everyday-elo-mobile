@@ -417,21 +417,13 @@ export async function updateRankedItem(
 }
 
 export async function incrementComparisonsCount(rankingId: string): Promise<void> {
-  const { data: ranking } = await supabase
-    .from('rankings')
-    .select('comparisons_count')
-    .eq('id', rankingId)
-    .single();
+  // Atomic increment via RPC — see supabase/migrations/20260523000000_increment_comparisons_count.sql.
+  // A read-then-update would race when concurrent comparisons land on the same ranking.
+  const { error } = await supabase.rpc('increment_comparisons_count', {
+    p_ranking_id: rankingId,
+  });
 
-  if (ranking) {
-    await supabase
-      .from('rankings')
-      .update({ 
-        comparisons_count: ranking.comparisons_count + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', rankingId);
-  }
+  if (error) throw error;
 }
 
 export async function markRankingComplete(rankingId: string): Promise<void> {
