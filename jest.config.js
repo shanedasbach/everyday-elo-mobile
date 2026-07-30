@@ -21,6 +21,7 @@ module.exports = {
     'lib/partial-ranking.ts',
     'lib/swipe-gesture.ts',
     'lib/notifications.ts',
+    'lib/supabase-config.ts',
   ],
   coverageThreshold: {
     global: {
