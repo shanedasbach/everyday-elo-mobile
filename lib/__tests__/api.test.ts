@@ -61,6 +61,7 @@ import {
   recordComparison,
   getFeaturedLists,
   duplicateList,
+  NotAuthenticatedError,
   List,
   ListItem,
   Ranking,
@@ -153,6 +154,133 @@ describe('API Module', () => {
       await expect(createList({ title: 'Test' })).rejects.toEqual({
         message: 'Database connection failed',
       });
+    });
+
+    it('should send creator_id as the signed-in user, never undefined', async () => {
+      const chain = mockQuery({ data: { id: 'list-abc' }, error: null });
+
+      await createList({ title: 'Owned List' });
+
+      const payload = chain.insert.mock.calls[0][0];
+      expect(payload.creator_id).toBe('user-123');
+    });
+  });
+
+  // ============================================
+  // USE CASE 1b: List ownership (issue #65)
+  //
+  // `creator_id` is nullable and RLS permits anonymous inserts, so a list
+  // created without a session is both invisible to getUserLists (which
+  // filters on creator_id) and updatable by anyone. Being unowned therefore
+  // has to be an explicit request, not a silent fallback.
+  // ============================================
+  describe('List ownership', () => {
+    const signedOut = () => {
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: null },
+      });
+    };
+
+    it('should refuse to create a list when nobody is signed in', async () => {
+      signedOut();
+      const chain = mockQuery({ data: null, error: null });
+
+      await expect(createList({ title: 'Orphan' })).rejects.toBeInstanceOf(
+        NotAuthenticatedError
+      );
+      expect(chain.insert).not.toHaveBeenCalled();
+    });
+
+    it('should explain what to do in the error message', async () => {
+      signedOut();
+      mockQuery({ data: null, error: null });
+
+      await expect(createList({ title: 'Orphan' })).rejects.toThrow(
+        /signed in/i
+      );
+    });
+
+    it('should treat an auth lookup error as not signed in', async () => {
+      // An expired or revoked token surfaces here as an error rather than a
+      // null user. Both must fail closed — this is the case that would
+      // otherwise show "Saved! List saved to My Lists" for a list that will
+      // never appear there.
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: null },
+        error: { message: 'JWT expired' },
+      });
+      const chain = mockQuery({ data: null, error: null });
+
+      await expect(createList({ title: 'Stale Session' })).rejects.toBeInstanceOf(
+        NotAuthenticatedError
+      );
+      expect(chain.insert).not.toHaveBeenCalled();
+    });
+
+    it('should allow an explicitly anonymous list with a null creator_id', async () => {
+      signedOut();
+      const chain = mockQuery({
+        data: { id: 'list-anon', title: 'Try It Out', creator_id: null },
+        error: null,
+      });
+
+      const result = await createList({
+        title: 'Try It Out',
+        allowAnonymous: true,
+      });
+
+      expect(result.id).toBe('list-anon');
+      const payload = chain.insert.mock.calls[0][0];
+      expect(payload.creator_id).toBeNull();
+      expect('creator_id' in payload).toBe(true);
+    });
+
+    it('should still attach the owner when signed in and anonymous is allowed', async () => {
+      // allowAnonymous is a permission, not an instruction to discard a
+      // known owner — otherwise the ad hoc ranking flow would orphan lists
+      // for signed-in users too.
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: { id: 'user-123' } },
+      });
+      const chain = mockQuery({ data: { id: 'list-abc' }, error: null });
+
+      await createList({ title: 'Ad Hoc', allowAnonymous: true });
+
+      expect(chain.insert.mock.calls[0][0].creator_id).toBe('user-123');
+    });
+
+    it('should refuse to duplicate a list when nobody is signed in', async () => {
+      signedOut();
+
+      const sourceList = {
+        id: 'source-list',
+        title: 'My Favorites',
+        creator_id: 'user-123',
+      };
+      let callIndex = 0;
+      const insertSpy = jest.fn().mockReturnThis();
+
+      (mockSupabase.from as jest.Mock).mockImplementation(() => {
+        const idx = callIndex++;
+        const chain: Record<string, jest.Mock> = {
+          select: jest.fn().mockReturnThis(),
+          insert: insertSpy,
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+          single: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
+        };
+        // getListItems uses order() as its terminal call
+        if (idx === 1) {
+          chain.order = jest.fn().mockResolvedValue({ data: [], error: null });
+        }
+        return chain;
+      });
+
+      await expect(duplicateList('source-list')).rejects.toBeInstanceOf(
+        NotAuthenticatedError
+      );
+      expect(insertSpy).not.toHaveBeenCalled();
     });
   });
 
