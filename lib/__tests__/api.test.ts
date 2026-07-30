@@ -1348,46 +1348,65 @@ describe('API Module', () => {
     });
 
     describe('getting lists with ranking status', () => {
-      it('should show "not_started" when no ranking exists', async () => {
-        const lists = [{ id: 'l1', title: 'Unranked List' }];
-        const items = [{ id: 'i1' }, { id: 'i2' }];
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+      // Mock builder that routes calls by table name. Tracks total .from() calls so
+      // tests can assert the query count is constant regardless of list count.
+      const buildMock = (opts: {
+        lists: any[];
+        items?: any[];
+        rankings?: any[];
+      }) => {
+        const fromCalls: string[] = [];
+        const chainFor = (table: string) => {
+          if (table === 'lists') {
+            return {
+              select: jest.fn().mockReturnThis(),
+              eq: jest.fn().mockReturnThis(),
+              order: jest.fn().mockResolvedValue({ data: opts.lists, error: null }),
+            };
+          }
+          if (table === 'list_items') {
+            return {
+              select: jest.fn().mockReturnThis(),
+              in: jest.fn().mockResolvedValue({ data: opts.items ?? [], error: null }),
+            };
+          }
+          if (table === 'rankings') {
+            const chain: any = {
+              select: jest.fn().mockReturnThis(),
+              in: jest.fn().mockReturnThis(),
+              eq: jest.fn().mockResolvedValue({ data: opts.rankings ?? [], error: null }),
+            };
+            return chain;
+          }
+          return {};
         };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          fromCalls.push(table);
+          return chainFor(table);
+        });
+        return { fromCalls };
+      };
+
+      it('should show "not_started" when no ranking exists', async () => {
+        buildMock({
+          lists: [{ id: 'l1', title: 'Unranked List' }],
+          items: [{ list_id: 'l1' }, { list_id: 'l1' }],
+          rankings: [],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
         expect(result[0].rankingStatus).toBe('not_started');
         expect(result[0].itemCount).toBe(2);
+        expect(result[0].comparisonsCount).toBe(0);
       });
 
       it('should show "in_progress" when ranking is incomplete', async () => {
-        const lists = [{ id: 'l1', title: 'In Progress' }];
-        const items = [{ id: 'i1' }];
-        const ranking = { is_complete: false, comparisons_count: 5 };
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: ranking }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        buildMock({
+          lists: [{ id: 'l1', title: 'In Progress' }],
+          items: [{ list_id: 'l1' }],
+          rankings: [{ list_id: 'l1', comparisons_count: 5, is_complete: false }],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
@@ -1396,49 +1415,94 @@ describe('API Module', () => {
       });
 
       it('should show "completed" when ranking is done', async () => {
-        const lists = [{ id: 'l1', title: 'Done' }];
-        const items = [{ id: 'i1' }];
-        const ranking = { is_complete: true, comparisons_count: 10 };
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: ranking }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        buildMock({
+          lists: [{ id: 'l1', title: 'Done' }],
+          items: [{ list_id: 'l1' }],
+          rankings: [{ list_id: 'l1', comparisons_count: 10, is_complete: true }],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
         expect(result[0].rankingStatus).toBe('completed');
+        expect(result[0].comparisonsCount).toBe(10);
       });
 
       it('should calculate estimated comparisons based on item count', async () => {
-        const lists = [{ id: 'l1', title: 'Test' }];
-        const items = [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }];
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        buildMock({
+          lists: [{ id: 'l1', title: 'Test' }],
+          items: [
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+          ],
+          rankings: [],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
         // 5 items * 2 = 10 estimated comparisons
         expect(result[0].estimatedComparisons).toBe(10);
+      });
+
+      it('should issue a constant number of queries for N=3 lists', async () => {
+        const lists = [
+          { id: 'l1', title: 'A' },
+          { id: 'l2', title: 'B' },
+          { id: 'l3', title: 'C' },
+        ];
+        const items = [
+          { list_id: 'l1' },
+          { list_id: 'l2' }, { list_id: 'l2' },
+          { list_id: 'l3' }, { list_id: 'l3' }, { list_id: 'l3' },
+        ];
+        const rankings = [
+          { list_id: 'l1', comparisons_count: 2, is_complete: false },
+          { list_id: 'l3', comparisons_count: 9, is_complete: true },
+        ];
+        const { fromCalls } = buildMock({ lists, items, rankings });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        // Exactly 3 queries: 1 lists + 1 list_items + 1 rankings
+        expect(fromCalls).toEqual(['lists', 'list_items', 'rankings']);
+        expect(result).toHaveLength(3);
+        expect(result[0].itemCount).toBe(1);
+        expect(result[1].itemCount).toBe(2);
+        expect(result[2].itemCount).toBe(3);
+        expect(result[0].rankingStatus).toBe('in_progress');
+        expect(result[1].rankingStatus).toBe('not_started');
+        expect(result[2].rankingStatus).toBe('completed');
+      });
+
+      it('should issue a constant number of queries for N=10 lists', async () => {
+        const lists = Array.from({ length: 10 }, (_, i) => ({ id: `l${i}`, title: `List ${i}` }));
+        const items = lists.flatMap((l) => [{ list_id: l.id }, { list_id: l.id }]);
+        const rankings = lists.map((l, i) => ({
+          list_id: l.id,
+          comparisons_count: i,
+          is_complete: i % 2 === 0,
+        }));
+        const { fromCalls } = buildMock({ lists, items, rankings });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        // Still exactly 3 queries — proves O(1) round-trips regardless of list count
+        expect(fromCalls).toEqual(['lists', 'list_items', 'rankings']);
+        expect(result).toHaveLength(10);
+        // Every list has 2 items, so estimatedComparisons == 4
+        result.forEach((r) => expect(r.estimatedComparisons).toBe(4));
+      });
+
+      it('should short-circuit and skip batched queries when user has no lists', async () => {
+        const { fromCalls } = buildMock({ lists: [] });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        expect(result).toEqual([]);
+        // No need to hit list_items or rankings when there are no lists
+        expect(fromCalls).toEqual(['lists']);
       });
     });
   });
