@@ -479,36 +479,151 @@ describe('API Module', () => {
     });
 
     describe('bulk adding items', () => {
-      it('should add multiple items sequentially', async () => {
+      it('should insert all items in a single batch with monotonically increasing display_order', async () => {
         const items = [
-          { id: 'i1', list_id: 'l1', name: 'Item 1', display_order: 0, created_at: '' },
-          { id: 'i2', list_id: 'l1', name: 'Item 2', display_order: 1, created_at: '' },
-          { id: 'i3', list_id: 'l1', name: 'Item 3', display_order: 2, created_at: '' },
+          { id: 'i1', list_id: 'l1', name: 'Item 1', display_order: 5, created_at: '' },
+          { id: 'i2', list_id: 'l1', name: 'Item 2', display_order: 6, created_at: '' },
+          { id: 'i3', list_id: 'l1', name: 'Item 3', display_order: 7, created_at: '' },
         ];
 
-        let itemIndex = 0;
-        let orderQuery = 0;
-        const chain = {
+        let callIndex = 0;
+        const orderChain = {
           select: jest.fn().mockReturnThis(),
-          insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            const order = orderQuery;
-            orderQuery++;
-            return Promise.resolve({ data: order > 0 ? [{ display_order: order - 1 }] : [] });
-          }),
-          single: jest.fn().mockImplementation(() => {
-            const item = items[itemIndex];
-            itemIndex++;
-            return Promise.resolve({ data: item, error: null });
-          }),
+          limit: jest.fn().mockResolvedValue({ data: [{ display_order: 4 }] }),
         };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: items, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
 
         const result = await addListItems('l1', ['Item 1', 'Item 2', 'Item 3']);
 
         expect(result).toHaveLength(3);
+        expect(insertChain.insert).toHaveBeenCalledTimes(1);
+        expect(insertChain.insert).toHaveBeenCalledWith([
+          { list_id: 'l1', name: 'Item 1', display_order: 5 },
+          { list_id: 'l1', name: 'Item 2', display_order: 6 },
+          { list_id: 'l1', name: 'Item 3', display_order: 7 },
+        ]);
+      });
+
+      it('should start display_order at 0 when list is empty', async () => {
+        const items = [
+          { id: 'i1', list_id: 'l1', name: 'A', display_order: 0, created_at: '' },
+          { id: 'i2', list_id: 'l1', name: 'B', display_order: 1, created_at: '' },
+        ];
+
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: items, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        const result = await addListItems('l1', ['A', 'B']);
+
+        expect(result).toEqual(items);
+        expect(insertChain.insert).toHaveBeenCalledWith([
+          { list_id: 'l1', name: 'A', display_order: 0 },
+          { list_id: 'l1', name: 'B', display_order: 1 },
+        ]);
+      });
+
+      it('should handle null existing display_order data', async () => {
+        const items = [
+          { id: 'i1', list_id: 'l1', name: 'A', display_order: 0, created_at: '' },
+        ];
+
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: null }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: items, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        const result = await addListItems('l1', ['A']);
+
+        expect(result).toEqual(items);
+        expect(insertChain.insert).toHaveBeenCalledWith([
+          { list_id: 'l1', name: 'A', display_order: 0 },
+        ]);
+      });
+
+      it('should short-circuit and not call supabase for empty names array', async () => {
+        const result = await addListItems('l1', []);
+
+        expect(result).toEqual([]);
+        expect(mockSupabase.from).not.toHaveBeenCalled();
+      });
+
+      it('should propagate supabase insert errors', async () => {
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        await expect(addListItems('l1', ['A', 'B'])).rejects.toEqual({ message: 'RLS denied' });
+      });
+
+      it('should return empty array when insert returns null data', async () => {
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: null, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        const result = await addListItems('l1', ['A']);
+        expect(result).toEqual([]);
       });
     });
 
@@ -1691,16 +1806,13 @@ describe('API Module', () => {
       // 0: getList         → from('lists').select().eq().single()
       // 1: getListItems    → from('list_items').select().eq().order()  [terminal]
       // 2: createList      → from('lists').insert().select().single()
-      // 3,5: addListItem order-check → from('list_items').select().eq().order().limit() [terminal]
-      // 4,6: addListItem insert      → from('list_items').insert().select().single()
+      // 3: addListItems order-check → from('list_items').select().eq().order().limit() [terminal]
+      // 4: addListItems batch insert → from('list_items').insert().select() [terminal]
       let callIndex = 0;
-      let limitCallIndex = 0;
       let singleCallIndex = 0;
       const singleResults = [
         { data: sourceList, error: null },   // getList
         { data: copiedList, error: null },   // createList
-        { data: sourceItems[0], error: null }, // addListItem item 1 insert
-        { data: sourceItems[1], error: null }, // addListItem item 2 insert
       ];
 
       (mockSupabase.from as jest.Mock).mockImplementation(() => {
@@ -1710,10 +1822,7 @@ describe('API Module', () => {
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            limitCallIndex++;
-            return Promise.resolve({ data: [] }); // no existing items for order check
-          }),
+          limit: jest.fn().mockResolvedValue({ data: [] }), // no existing items for order check
           single: jest.fn().mockImplementation(() => {
             const result = singleResults[singleCallIndex];
             singleCallIndex++;
@@ -1723,6 +1832,10 @@ describe('API Module', () => {
         // getListItems (idx 1) uses order() as terminal
         if (idx === 1) {
           chain.order = jest.fn().mockResolvedValue({ data: sourceItems, error: null });
+        }
+        // batch insert (idx 4) uses select() as terminal
+        if (idx === 4) {
+          chain.select = jest.fn().mockResolvedValue({ data: sourceItems, error: null });
         }
         return chain;
       });
