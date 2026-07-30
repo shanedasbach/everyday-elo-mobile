@@ -53,6 +53,33 @@ function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
 
+/**
+ * Thrown when an operation needs an owner but no valid session is available.
+ * Call sites can catch this specifically to prompt for sign-in rather than
+ * showing a generic failure.
+ */
+export class NotAuthenticatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotAuthenticatedError';
+  }
+}
+
+/**
+ * Resolve the signed-in user's id, or null if there isn't one.
+ *
+ * `supabase.auth.getUser()` validates the stored token against the server, so
+ * this returns null when a session has expired or been revoked even though the
+ * in-memory auth context still holds a user. Anything that needs an owner must
+ * go through here instead of reading `user?.id` optimistically — see
+ * `createList`.
+ */
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) return null;
+  return data?.user?.id ?? null;
+}
+
 // ============================================
 // LISTS
 // ============================================
@@ -62,16 +89,34 @@ export async function createList(data: {
   description?: string;
   comparison_prompt?: string;
   is_private?: boolean;
+  /**
+   * Permit creating a list with no owner (`creator_id: null`).
+   *
+   * Only the "rank something without an account" flow should set this. An
+   * unowned list never comes back from `getUserLists` (which filters on
+   * creator_id) and, under the current RLS policy, is updatable by anyone —
+   * so it has to be a deliberate choice at the call site, never a silent
+   * fallback when the session turns out to be missing.
+   */
+  allowAnonymous?: boolean;
 }): Promise<List> {
-  const { data: { user } } = await supabase.auth.getUser();
-  
+  const userId = await getAuthenticatedUserId();
+
+  if (!userId && !data.allowAnonymous) {
+    throw new NotAuthenticatedError(
+      'You must be signed in to create a list. Please sign in and try again.'
+    );
+  }
+
   const { data: list, error } = await supabase
     .from('lists')
     .insert({
       title: data.title,
       description: data.description,
       comparison_prompt: data.comparison_prompt,
-      creator_id: user?.id,
+      // Explicitly null rather than undefined, so an unowned list is a stated
+      // intent in the payload instead of an omitted column.
+      creator_id: userId,
       is_private: data.is_private || false,
       share_code: generateId().slice(0, 8),
     })
