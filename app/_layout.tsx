@@ -10,6 +10,7 @@ import {
   registerDeviceForUser,
   subscribeToNotificationTaps,
 } from '../lib/notifications';
+import { prunePartialRankings } from '../lib/partial-ranking';
 
 // Configure foreground handler once at module load — must be set before any
 // notification is received.
@@ -63,6 +64,14 @@ function NotificationBridge() {
 
 export default function RootLayout() {
   useDeepLinkHandler();
+
+  // Sweep expired partial rankings once per launch so abandoned progress stops
+  // occupying keychain entries and offering stale resume prompts.
+  useEffect(() => {
+    prunePartialRankings().catch((error) => {
+      console.error('Failed to prune partial rankings:', error);
+    });
+  }, []);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

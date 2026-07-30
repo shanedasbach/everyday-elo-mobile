@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { clearPartialRanking } from './partial-ranking';
 
 // Types
 export interface List {
@@ -239,6 +240,16 @@ export async function deleteList(id: string): Promise<void> {
     .eq('id', id);
 
   if (error) throw error;
+
+  // The list id is the only handle on its local partial ranking; once the row
+  // is gone nothing can ever discover that key again, so clear it here.
+  // Best-effort: the remote delete already succeeded, and failing the call
+  // would tell the caller the list still exists.
+  try {
+    await clearPartialRanking(id);
+  } catch (localError) {
+    console.error('Failed to clear partial ranking for deleted list:', localError);
+  }
 }
 
 // ============================================

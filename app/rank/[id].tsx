@@ -291,8 +291,12 @@ export default function RankScreen() {
         } catch (error) {
           console.error('Failed to mark complete:', error);
         }
-      } else if (useOfflineMode && id) {
-        // Clear partial storage once the template ranking is finished.
+      }
+
+      // Clear partial storage once the ranking is finished — including for
+      // Supabase-backed rankings, which may still carry a payload from an
+      // earlier offline session for the same id.
+      if (id) {
         try {
           await clearPartialRanking(id);
         } catch (error) {
