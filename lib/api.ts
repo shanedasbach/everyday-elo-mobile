@@ -246,8 +246,10 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     return [];
   }
 
-  // Transform the data
+  // Transform the data, tracking each list's creator so names can be
+  // resolved in a single batched query afterwards (avoids a per-list round-trip).
   const featured: FeaturedList[] = [];
+  const creatorIdByListId = new Map<string, string>();
   for (const item of data || []) {
     const list = item.lists as any;
     if (!list) continue;
@@ -264,6 +266,10 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
 
+    if (list.creator_id) {
+      creatorIdByListId.set(list.id, list.creator_id);
+    }
+
     featured.push({
       id: item.id,
       list_id: list.id,
@@ -273,6 +279,33 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       item_count: itemCount || 0,
       ranking_count: rankingCount || 0,
     });
+  }
+
+  // Resolve creator display names in a single batched query, then map onto
+  // each featured list. Unresolved creators simply leave creator_name undefined.
+  const creatorIds = Array.from(new Set(creatorIdByListId.values()));
+  if (creatorIds.length > 0) {
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, name')
+      .in('id', creatorIds);
+
+    if (profilesError) {
+      console.log('Creator names not available:', profilesError.message);
+    } else {
+      const nameById = new Map<string, string>();
+      for (const profile of profiles || []) {
+        if (profile?.id && profile.name) {
+          nameById.set(profile.id, profile.name);
+        }
+      }
+      for (const entry of featured) {
+        const creatorId = creatorIdByListId.get(entry.list_id);
+        if (creatorId) {
+          entry.creator_name = nameById.get(creatorId);
+        }
+      }
+    }
   }
 
   return featured;

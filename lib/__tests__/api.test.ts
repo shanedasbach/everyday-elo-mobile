@@ -1061,6 +1061,162 @@ describe('API Module', () => {
 
         expect(result).toEqual([]);
       });
+
+      it('should populate creator_name from a single batched profiles query', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+          {
+            id: 'f2',
+            list_id: 'list-2',
+            featured_at: '2024-01-02T00:00:00Z',
+            // Two lists by the same creator — should resolve to one batched lookup.
+            lists: { id: 'list-2', title: 'List Two', description: 'd2', creator_id: 'user-1' },
+          },
+          {
+            id: 'f3',
+            list_id: 'list-3',
+            featured_at: '2024-01-03T00:00:00Z',
+            lists: { id: 'list-3', title: 'List Three', description: 'd3', creator_id: 'user-2' },
+          },
+        ];
+
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const countChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 7, error: null }),
+        };
+        const inMock = jest.fn().mockResolvedValue({
+          data: [
+            { id: 'user-1', name: 'Alice' },
+            { id: 'user-2', name: 'Bob' },
+          ],
+          error: null,
+        });
+        const profilesChain = {
+          select: jest.fn().mockReturnThis(),
+          in: inMock,
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'profiles') return profilesChain;
+          return countChain;
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result.map((r) => r.creator_name)).toEqual(['Alice', 'Alice', 'Bob']);
+        // One profiles query, with deduped creator ids.
+        expect(mockSupabase.from).toHaveBeenCalledWith('profiles');
+        expect(profilesChain.select).toHaveBeenCalledTimes(1);
+        expect(inMock).toHaveBeenCalledWith('id', ['user-1', 'user-2']);
+      });
+
+      it('should leave creator_name undefined when a creator has no profile match', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'ghost' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const countChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 0, error: null }),
+        };
+        const profilesChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: [], error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'profiles') return profilesChain;
+          return countChain;
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should not throw and still return lists when the profiles query errors', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const countChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 0, error: null }),
+        };
+        const profilesChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: null, error: { message: 'boom' } }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'profiles') return profilesChain;
+          return countChain;
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].title).toBe('List One');
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should not query profiles when no creator ids are present', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const countChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 0, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          return countChain;
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(mockSupabase.from).not.toHaveBeenCalledWith('profiles');
+      });
     });
   });
 
