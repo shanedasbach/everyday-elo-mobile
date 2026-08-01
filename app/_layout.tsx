@@ -10,11 +10,9 @@ import {
   registerDeviceForUser,
   subscribeToNotificationTaps,
 } from '../lib/notifications';
-import { initMonitoring } from '../lib/monitoring';
-
-// Initialize crash reporting before anything else runs so early errors are
-// captured. No-ops in development and when no DSN is configured.
-initMonitoring();
+// Side-effect import: initializes crash reporting at module load. Lives in
+// lib/ so lib/__tests__/bootstrap.test.ts can assert it actually runs.
+import '../lib/bootstrap';
 
 // Configure foreground handler once at module load — must be set before any
 // notification is received.

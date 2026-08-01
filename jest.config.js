@@ -21,6 +21,8 @@ module.exports = {
     'lib/partial-ranking.ts',
     'lib/swipe-gesture.ts',
     'lib/notifications.ts',
+    'lib/monitoring.ts',
+    'lib/bootstrap.ts',
   ],
   coverageThreshold: {
     global: {

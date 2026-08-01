@@ -8,6 +8,15 @@ const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
 let initialized = false;
 
 /**
+ * Outcome of an `initMonitoring()` call.
+ * - `enabled` — Sentry.init ran; crashes are being reported.
+ * - `already-initialized` — an earlier call already enabled it.
+ * - `no-dsn` — no DSN configured, so monitoring stays off.
+ * - `development` — suppressed in dev so local runs emit no network calls.
+ */
+export type MonitoringStatus = 'enabled' | 'already-initialized' | 'no-dsn' | 'development';
+
+/**
  * Resolve the Sentry DSN. Prefer the `EXPO_PUBLIC_SENTRY_DSN` env var (mirrors
  * how Supabase config is read in supabase.ts); fall back to `extra.sentryDsn`
  * so the DSN can also live in app.json / app.config. Returns undefined when no
@@ -21,35 +30,49 @@ export function getSentryDsn(): string | undefined {
 }
 
 /**
- * Initialize Sentry crash reporting. No-ops (and reports false) when no DSN is
- * configured or when running in development, so local and test runs never emit
- * network calls. Idempotent — only the first effective call takes hold.
+ * Initialize Sentry crash reporting. No-ops when no DSN is configured or when
+ * running in development, so local and test runs never emit network calls.
+ * Idempotent — only the first effective call takes hold. The returned status
+ * distinguishes the reasons it may not have; use `isMonitoringEnabled()` to ask
+ * whether monitoring is currently running.
+ *
+ * No performance-tracing integration is registered, so `tracesSampleRate` is
+ * deliberately unset — sampling with nothing to sample only costs a decision
+ * per event. Tracing needs `Sentry.wrap()` on the root component plus
+ * `reactNavigationIntegration()`, which is a separate change.
  */
-export function initMonitoring(): boolean {
-  if (initialized) return false;
+export function initMonitoring(): MonitoringStatus {
+  if (initialized) return 'already-initialized';
   const dsn = getSentryDsn();
-  if (!dsn || isDev) return false;
+  if (!dsn) return 'no-dsn';
+  if (isDev) return 'development';
   Sentry.init({
     dsn,
     debug: isDev,
-    tracesSampleRate: 0.1,
     enableAutoSessionTracking: true,
+    // The SDK attaches the reporter's IP address by default. State the posture
+    // explicitly rather than inheriting it.
+    sendDefaultPii: false,
   });
   initialized = true;
-  return true;
+  return 'enabled';
+}
+
+/** Whether crash reporting is currently active. */
+export function isMonitoringEnabled(): boolean {
+  return initialized;
 }
 
 /**
- * Report a caught exception to Sentry. No-ops when monitoring was never
- * initialized (no DSN / dev), so callers — e.g. an ErrorBoundary — can wire to
- * this unconditionally.
+ * Report a caught exception to Sentry. When monitoring is not active (no DSN /
+ * dev) the error is logged instead of dropped, so a caller such as an
+ * ErrorBoundary can wire to this unconditionally without losing errors during
+ * local debugging.
  */
 export function captureException(error: unknown): void {
-  if (!initialized) return;
+  if (!initialized) {
+    console.error('[monitoring] monitoring disabled, captured error:', error);
+    return;
+  }
   Sentry.captureException(error);
-}
-
-/** Test-only hook to reset module state between cases. */
-export function __resetMonitoringForTests(): void {
-  initialized = false;
 }

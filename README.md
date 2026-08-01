@@ -105,6 +105,36 @@ eas submit --platform android
 | `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Supabase anonymous key |
 | `EXPO_PUBLIC_SENTRY_DSN` | Sentry DSN for crash reporting (optional — unset disables it; also no-ops in dev) |
 
+## Crash reporting
+
+`lib/monitoring.ts` calls `Sentry.init` at startup (via `lib/bootstrap.ts`,
+imported by `app/_layout.tsx`) whenever `EXPO_PUBLIC_SENTRY_DSN` is set and the
+build is not a dev build. That is all the runtime needs — set the DSN and
+crashes are reported.
+
+**Source-map upload is not enabled.** The `@sentry/react-native/expo` config
+plugin is deliberately absent from `app.json`: it runs `sentry-cli` on every
+`expo prebuild` / `eas build` and fails the build unless a real Sentry
+organization, project, and auth token exist. None do yet. Stack traces are
+therefore minified until someone creates the Sentry project and then adds:
+
+```jsonc
+// app.json → expo.plugins
+["@sentry/react-native/expo", { "organization": "<org-slug>", "project": "<project-slug>" }]
+```
+
+along with these **build-time** variables (they are secrets — set them in EAS,
+not in `.env`, and never prefix them with `EXPO_PUBLIC_`):
+
+| Variable | Description |
+|----------|-------------|
+| `SENTRY_AUTH_TOKEN` | Token with `project:releases` scope, used by `sentry-cli` to upload source maps |
+| `SENTRY_ORG` | Sentry organization slug (if not set in the plugin config) |
+| `SENTRY_PROJECT` | Sentry project slug (if not set in the plugin config) |
+
+Setting `SENTRY_DISABLE_AUTO_UPLOAD=true` skips the upload step if the plugin
+is present before the token is.
+
 ## Related
 
 - [everyday-elo](https://github.com/shanedasbach/everyday-elo) - Web app

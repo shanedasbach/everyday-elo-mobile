@@ -65,31 +65,42 @@ describe('initMonitoring', () => {
   it('calls Sentry.init with the DSN when configured and not in dev', () => {
     process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
     const mod = loadMonitoring(false);
-    expect(mod.initMonitoring()).toBe(true);
+    expect(mod.initMonitoring()).toBe('enabled');
+    expect(mod.isMonitoringEnabled()).toBe(true);
     expect(Sentry.init).toHaveBeenCalledTimes(1);
     expect(Sentry.init).toHaveBeenCalledWith(
-      expect.objectContaining({ dsn: 'https://env@sentry.io/1', tracesSampleRate: 0.1 }),
+      expect.objectContaining({ dsn: 'https://env@sentry.io/1', sendDefaultPii: false }),
     );
   });
 
-  it('no-ops in development even with a DSN', () => {
+  it('does not set tracesSampleRate — no tracing integration is registered', () => {
+    process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
+    loadMonitoring(false).initMonitoring();
+    const options = (Sentry.init as jest.Mock).mock.calls[0][0];
+    expect(options).not.toHaveProperty('tracesSampleRate');
+  });
+
+  it('reports `development` and no-ops in dev even with a DSN', () => {
     process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
     const mod = loadMonitoring(true);
-    expect(mod.initMonitoring()).toBe(false);
+    expect(mod.initMonitoring()).toBe('development');
+    expect(mod.isMonitoringEnabled()).toBe(false);
     expect(Sentry.init).not.toHaveBeenCalled();
   });
 
-  it('no-ops when no DSN is configured', () => {
+  it('reports `no-dsn` when no DSN is configured', () => {
     const mod = loadMonitoring(false);
-    expect(mod.initMonitoring()).toBe(false);
+    expect(mod.initMonitoring()).toBe('no-dsn');
+    expect(mod.isMonitoringEnabled()).toBe(false);
     expect(Sentry.init).not.toHaveBeenCalled();
   });
 
-  it('is idempotent — a second call does not re-init', () => {
+  it('is idempotent — a second call reports `already-initialized` and does not re-init', () => {
     process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
     const mod = loadMonitoring(false);
-    expect(mod.initMonitoring()).toBe(true);
-    expect(mod.initMonitoring()).toBe(false);
+    expect(mod.initMonitoring()).toBe('enabled');
+    expect(mod.initMonitoring()).toBe('already-initialized');
+    expect(mod.isMonitoringEnabled()).toBe(true);
     expect(Sentry.init).toHaveBeenCalledTimes(1);
   });
 });
@@ -104,9 +115,13 @@ describe('captureException', () => {
     expect(Sentry.captureException).toHaveBeenCalledWith(err);
   });
 
-  it('no-ops when monitoring was never initialized', () => {
+  it('logs instead of dropping when monitoring is not active', () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     const mod = loadMonitoring(false);
-    mod.captureException(new Error('boom'));
+    const err = new Error('boom');
+    mod.captureException(err);
     expect(Sentry.captureException).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('monitoring disabled'), err);
+    consoleError.mockRestore();
   });
 });

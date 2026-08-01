@@ -54,13 +54,6 @@
         {
           "color": "#3B82F6"
         }
-      ],
-      [
-        "@sentry/react-native/expo",
-        {
-          "organization": "everyday-elo",
-          "project": "everyday-elo-mobile"
-        }
       ]
     ],
     "experiments": {
