@@ -168,21 +168,19 @@ export async function getUserListsWithStatus(userId: string): Promise<ListWithSt
   const listIds = lists.map((l) => l.id);
 
   // Batch-fetch items and rankings for all lists in two queries, regardless of N.
-  // Total round-trips: 1 lists + 1 items + 1 rankings.
-  const [itemsRes, rankingsRes] = await Promise.all([
-    supabase.from('list_items').select('list_id').in('list_id', listIds),
+  // Total round-trips: 1 lists + 1 items + 1 rankings. Item counts go through
+  // countRowsByListId so this call site and getFeaturedLists share one
+  // convention — a user with more than db-max-rows list items across their own
+  // lists hits the same silent-truncation ceiling, just later than the
+  // unbounded featured tables do.
+  const [itemCounts, rankingsRes] = await Promise.all([
+    countRowsByListId('list_items', listIds),
     supabase
       .from('rankings')
       .select('list_id, comparisons_count, is_complete')
       .in('list_id', listIds)
       .eq('user_id', userId),
   ]);
-
-  const itemCounts = new Map<string, number>();
-  for (const row of itemsRes.data || []) {
-    const id = (row as any).list_id;
-    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
-  }
 
   const rankingsByList = new Map<string, { comparisons_count: number; is_complete: boolean }>();
   for (const row of rankingsRes.data || []) {
@@ -236,54 +234,89 @@ export interface FeaturedList {
   creator_name?: string;
 }
 
+// Exact server-side count per list, all issued together. Costs N requests but
+// only one round-trip of wall-clock latency, carries no row payload, and has no
+// row ceiling — this is the fallback for when the batched count below cannot be
+// proven complete. A list whose count query fails is left out of the map rather
+// than being given a wrong number; the caller's `|| 0` then shows it as 0.
+async function countRowsPerListExact(
+  table: 'list_items' | 'rankings',
+  listIds: string[]
+): Promise<Map<string, number>> {
+  const results = await Promise.all(
+    listIds.map(async (listId) => {
+      const { count, error } = await supabase
+        .from(table)
+        .select('id', { count: 'exact', head: true })
+        .eq('list_id', listId);
+
+      if (error) {
+        console.log(`Exact ${table} count for list ${listId} not available:`, error.message);
+        return null;
+      }
+      return [listId, count || 0] as const;
+    })
+  );
+
+  const counts = new Map<string, number>();
+  for (const result of results) {
+    if (result) counts.set(result[0], result[1]);
+  }
+  return counts;
+}
+
 // PostgREST caps the rows any single select may return (`db-max-rows`, 1000 by
-// default) and truncates the response *silently* — no error, no signal. So a
-// single `.in('list_id', …)` fetch cannot be trusted to have seen every row, and
-// counting its results in JS would under-report exactly as the table grows.
-// `rankings` is the exposed one here: it spans every user who has ranked a
+// default) and truncates the response *silently* — so counting the rows of one
+// `.in('list_id', …)` fetch in JS under-reports as soon as a table outgrows the
+// cap. `rankings` is the exposed one here: it spans every user who has ranked a
 // featured list, and featured lists are by definition the popular ones.
 //
-// Page explicitly instead. Page size is a property of the table's size, not of
-// how many lists were requested, so round-trips stay constant in N — which is
-// what issue #29 asks for — while the counts stay exact.
-const COUNT_PAGE_SIZE = 1000;
-// Backstop so a server that ignores `.range()` cannot spin this forever.
-const MAX_COUNT_PAGES = 100;
-
+// Asking for `count: 'exact'` on that same request is what removes the guess.
+// PostgREST reports the true number of matching rows in `Content-Range`
+// independently of how many it chose to return, so `rows.length < count` *is*
+// the truncation signal — the deployed cap never has to be known or assumed.
+//
+// When the two agree, the per-list breakdown is provably complete and this cost
+// one query per table regardless of N (issue #29's constant-query-count AC).
+// When they disagree, fall back to exact server-side counts rather than
+// reporting a number known to be low (#29's exact-counts AC). The fallback is
+// still one round-trip of latency, so neither path reintroduces the serial
+// per-list waterfall that #29 was filed about.
 async function countRowsByListId(
   table: 'list_items' | 'rankings',
   listIds: string[]
 ): Promise<Map<string, number>> {
-  const counts = new Map<string, number>();
+  const { data, count, error } = await supabase
+    .from(table)
+    .select('list_id', { count: 'exact' })
+    .in('list_id', listIds);
 
-  for (let page = 0; page < MAX_COUNT_PAGES; page++) {
-    const from = page * COUNT_PAGE_SIZE;
-    const { data, error } = await supabase
-      .from(table)
-      .select('list_id')
-      .in('list_id', listIds)
-      .range(from, from + COUNT_PAGE_SIZE - 1);
-
-    if (error) {
-      // Match getFeaturedLists' tolerance for a missing/failing table: report
-      // it rather than failing the whole browse screen. Loud, not silent.
-      console.log(`Counts for ${table} not available:`, error.message);
-      return counts;
-    }
-
-    const rows = data || [];
-    for (const row of rows) {
-      const id = (row as any).list_id;
-      counts.set(id, (counts.get(id) || 0) + 1);
-    }
-
-    // A short page means the server had nothing more to give.
-    if (rows.length < COUNT_PAGE_SIZE) return counts;
+  if (error) {
+    // Match getFeaturedLists' tolerance for a missing/failing table: report it
+    // rather than failing the whole browse screen. Loud, not silent — and an
+    // empty map degrades every count to 0 uniformly instead of showing a
+    // plausible-looking partial number.
+    console.log(`Counts for ${table} not available:`, error.message);
+    return new Map();
   }
 
-  console.log(
-    `Counts for ${table} truncated at ${MAX_COUNT_PAGES * COUNT_PAGE_SIZE} rows`
-  );
+  const rows = data || [];
+
+  // `count == null` covers a server that declined to report a total; treat
+  // unknown as untrustworthy rather than assuming completeness.
+  if (count == null || rows.length < count) {
+    console.log(
+      `Batched ${table} counts incomplete (${rows.length} rows of ${count ?? 'unknown'}); ` +
+        'falling back to exact per-list counts'
+    );
+    return countRowsPerListExact(table, listIds);
+  }
+
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const id = (row as any).list_id;
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
   return counts;
 }
 
@@ -316,7 +349,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
 
   // Batch-count both tables for every featured list at once. Round-trips no
   // longer grow with the number of featured lists — see countRowsByListId for
-  // why each count is paged rather than fetched in one unbounded select.
+  // how each count proves itself complete rather than trusting one select.
   const [itemCounts, rankingCounts] = await Promise.all([
     countRowsByListId('list_items', listIds),
     countRowsByListId('rankings', listIds),

@@ -1152,16 +1152,26 @@ describe('API Module', () => {
     });
 
     describe('featured lists', () => {
-      // Count queries are paged (see countRowsByListId), so the count chains
-      // honour `.range(from, to)` against the row set they were given — that is
-      // what makes the truncation test below meaningful rather than decorative.
-      const makeCountChain = (rows: Array<{ list_id: string }> | null, error: any = null) => {
+      // A batched count query asks for `count: 'exact'` alongside the rows, so
+      // the chain resolves with both. `reportedCount` is what the server claims
+      // matched; leaving it undefined means "server returned everything it had",
+      // which is the honest default for a small result set.
+      const makeCountChain = (
+        rows: Array<{ list_id: string }> | null,
+        error: any = null,
+        reportedCount?: number | null,
+      ) => {
         const chain: any = {
           select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockReturnThis(),
-          range: jest.fn((from: number, to: number) =>
+          in: jest.fn(() =>
             Promise.resolve(
-              error ? { data: null, error } : { data: rows && rows.slice(from, to + 1), error: null }
+              error
+                ? { data: null, count: null, error }
+                : {
+                    data: rows,
+                    count: reportedCount === undefined ? (rows || []).length : reportedCount,
+                    error: null,
+                  }
             )
           ),
         };
@@ -1354,63 +1364,146 @@ describe('API Module', () => {
         expect(result[0].ranking_count).toBe(1);
       });
 
-      // Regression guard for the silent-truncation defect: PostgREST caps a
-      // single select at db-max-rows (1000 by default) and truncates with no
-      // error, so counting one unbounded response under-reports as soon as a
-      // popular featured list crosses the cap.
-      it('should count past the 1000-row PostgREST page cap instead of under-reporting', async () => {
-        const featured = [
-          {
-            id: 'f1',
-            list_id: 'list-1',
-            featured_at: '2024-01-01T00:00:00Z',
-            lists: { id: 'list-1', title: 'Popular', description: '' },
-          },
-        ];
-        const rankingRows = Array.from({ length: 1500 }, () => ({ list_id: 'list-1' }));
-        const { rankingsChain } = setupFeaturedMock(featured, null, [], rankingRows);
+      // Regression guards for the silent-truncation defect: PostgREST caps a
+      // single select at db-max-rows and truncates with no error, so counting
+      // one unbounded response under-reports as soon as a popular featured list
+      // crosses the cap. The exact total the server reports alongside the rows
+      // is what makes that detectable without knowing the deployed cap.
+      //
+      // Two-list fixture used by the fallback tests below.
+      const twoFeatured = [
+        {
+          id: 'f1',
+          list_id: 'list-1',
+          featured_at: '2024-01-01T00:00:00Z',
+          lists: { id: 'list-1', title: 'Popular', description: '' },
+        },
+        {
+          id: 'f2',
+          list_id: 'list-2',
+          featured_at: '2024-01-02T00:00:00Z',
+          lists: { id: 'list-2', title: 'Also Popular', description: '' },
+        },
+      ];
 
-        const result = await getFeaturedLists();
-
-        expect(result[0].ranking_count).toBe(1500);
-        // Two pages: [0, 999] then [1000, 1999], which comes back short and stops.
-        expect(rankingsChain.range).toHaveBeenCalledTimes(2);
-        expect(rankingsChain.range).toHaveBeenNthCalledWith(1, 0, 999);
-        expect(rankingsChain.range).toHaveBeenNthCalledWith(2, 1000, 1999);
+      // A chain whose batched `.in()` under-delivers relative to the total it
+      // reports, and whose `.eq()` answers the exact per-list head counts the
+      // fallback then asks for.
+      const makeTruncatedCountChain = (
+        returnedRows: Array<{ list_id: string }>,
+        reportedCount: number | null,
+        exactCounts: Record<string, number>,
+        exactError: any = null,
+      ) => ({
+        select: jest.fn().mockReturnThis(),
+        in: jest.fn(() =>
+          Promise.resolve({ data: returnedRows, count: reportedCount, error: null })
+        ),
+        eq: jest.fn((_column: string, listId: string) =>
+          Promise.resolve(
+            exactError
+              ? { count: null, error: exactError }
+              : // A list absent from exactCounts stands in for a successful
+                // head request that carried no total.
+                { count: exactCounts[listId] ?? null, error: null }
+          )
+        ),
       });
 
-      it('should stop paging at the backstop rather than looping forever', async () => {
-        const featured = [
-          {
-            id: 'f1',
-            list_id: 'list-1',
-            featured_at: '2024-01-01T00:00:00Z',
-            lists: { id: 'list-1', title: 'Popular', description: '' },
-          },
-        ];
+      const setupTruncatedMock = (rankingsChain: any) => {
         const featuredChain = {
           select: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+          limit: jest.fn().mockResolvedValue({ data: twoFeatured, error: null }),
         };
-        // A server that ignores `.range()` and always hands back a full page —
-        // without the page cap this would never terminate.
-        const fullPage = Array.from({ length: 1000 }, () => ({ list_id: 'list-1' }));
-        const runawayChain = {
-          select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockReturnThis(),
-          range: jest.fn().mockResolvedValue({ data: fullPage, error: null }),
-        };
+        const itemsChain = makeCountChain([{ list_id: 'list-1' }]);
         (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
           if (table === 'featured_lists') return featuredChain;
-          return runawayChain;
+          if (table === 'list_items') return itemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`Unexpected table: ${table}`);
         });
+        return { itemsChain };
+      };
+
+      it('should fall back to exact per-list counts when the batched response is truncated', async () => {
+        // Server hands back 1000 rows but reports 1500 matched — the response
+        // was capped. Counting what arrived would report 1000, silently low.
+        const returnedRows = Array.from({ length: 1000 }, () => ({ list_id: 'list-1' }));
+        const rankingsChain = makeTruncatedCountChain(returnedRows, 1500, {
+          'list-1': 1400,
+          'list-2': 100,
+        });
+        setupTruncatedMock(rankingsChain);
 
         const result = await getFeaturedLists();
 
-        expect(runawayChain.range).toHaveBeenCalledTimes(200); // 100 pages × 2 tables
-        expect(result[0].item_count).toBe(100000);
-        expect(result[0].ranking_count).toBe(100000);
+        expect(result[0].ranking_count).toBe(1400);
+        expect(result[1].ranking_count).toBe(100);
+        // One exact head count per list, issued together rather than serially.
+        expect(rankingsChain.eq).toHaveBeenCalledTimes(2);
+        expect(rankingsChain.eq).toHaveBeenNthCalledWith(1, 'list_id', 'list-1');
+        expect(rankingsChain.eq).toHaveBeenNthCalledWith(2, 'list_id', 'list-2');
+        expect(rankingsChain.select).toHaveBeenCalledWith('id', { count: 'exact', head: true });
+      });
+
+      it('should fall back when the server reports no total at all', async () => {
+        // No `Content-Range` total means completeness cannot be proven, so the
+        // batched breakdown must not be trusted even though nothing errored.
+        const rankingsChain = makeTruncatedCountChain([{ list_id: 'list-1' }], null, {
+          'list-1': 7,
+          'list-2': 3,
+        });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(7);
+        expect(result[1].ranking_count).toBe(3);
+        expect(rankingsChain.eq).toHaveBeenCalledTimes(2);
+      });
+
+      it('should not fall back when the batched response is provably complete', async () => {
+        // Rows returned == total reported, so the breakdown is complete and no
+        // per-list query should be issued.
+        const rankingsChain = makeTruncatedCountChain(
+          [{ list_id: 'list-1' }, { list_id: 'list-2' }],
+          2,
+          { 'list-1': 999, 'list-2': 999 },
+        );
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(1);
+        expect(result[1].ranking_count).toBe(1);
+        expect(rankingsChain.eq).not.toHaveBeenCalled();
+      });
+
+      it('should treat a fallback head request with no total as 0', async () => {
+        const returnedRows = Array.from({ length: 10 }, () => ({ list_id: 'list-1' }));
+        // list-2 answers without a count — not an error, just nothing to report.
+        const rankingsChain = makeTruncatedCountChain(returnedRows, 5000, { 'list-1': 4900 });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(4900);
+        expect(result[1].ranking_count).toBe(0);
+      });
+
+      it('should show 0 rather than a partial number when an exact fallback count fails', async () => {
+        const returnedRows = Array.from({ length: 10 }, () => ({ list_id: 'list-1' }));
+        const rankingsChain = makeTruncatedCountChain(returnedRows, 5000, {}, {
+          message: 'count exploded',
+        });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        // A list left out of the map degrades to 0 — never to the truncated 10.
+        expect(result[0].ranking_count).toBe(0);
+        expect(result[1].ranking_count).toBe(0);
       });
 
       it('should populate creator_name from a single batched profiles query', async () => {
@@ -1630,6 +1723,10 @@ describe('API Module', () => {
         lists: any[];
         items?: any[];
         rankings?: any[];
+        // What the server claims matched, when that differs from what it
+        // returned — i.e. a truncated batched count.
+        itemsReportedCount?: number;
+        exactItemCounts?: Record<string, number>;
       }) => {
         const fromCalls: string[] = [];
         const chainFor = (table: string) => {
@@ -1641,9 +1738,19 @@ describe('API Module', () => {
             };
           }
           if (table === 'list_items') {
+            const items = opts.items ?? [];
             return {
               select: jest.fn().mockReturnThis(),
-              in: jest.fn().mockResolvedValue({ data: opts.items ?? [], error: null }),
+              in: jest.fn().mockResolvedValue({
+                data: items,
+                count: opts.itemsReportedCount ?? items.length,
+                error: null,
+              }),
+              // Only reached when the batched count above is short of the total
+              // it reports — the shared countRowsByListId fallback.
+              eq: jest.fn((_column: string, listId: string) =>
+                Promise.resolve({ count: opts.exactItemCounts?.[listId] ?? 0, error: null })
+              ),
             };
           }
           if (table === 'rankings') {
@@ -1769,6 +1876,40 @@ describe('API Module', () => {
         expect(result).toHaveLength(10);
         // Every list has 2 items, so estimatedComparisons == 4
         result.forEach((r) => expect(r.estimatedComparisons).toBe(4));
+      });
+
+      it('should default to zero items and no ranking when both batched queries come back empty', async () => {
+        buildMock({
+          lists: [{ id: 'l1', title: 'Has items' }, { id: 'l2', title: 'Empty' }],
+          items: [{ list_id: 'l1' }],
+          rankings: null as any,
+        });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        expect(result[1].itemCount).toBe(0);
+        expect(result[1].estimatedComparisons).toBe(0);
+        expect(result.map((r) => r.rankingStatus)).toEqual(['not_started', 'not_started']);
+      });
+
+      // This call site shares countRowsByListId with getFeaturedLists, so a
+      // user whose own lists hold more rows than db-max-rows gets exact counts
+      // here too rather than a silently capped number.
+      it('should fall back to exact item counts when the batched count is truncated', async () => {
+        const { fromCalls } = buildMock({
+          lists: [{ id: 'l1', title: 'Huge' }, { id: 'l2', title: 'Small' }],
+          items: Array.from({ length: 1000 }, () => ({ list_id: 'l1' })),
+          itemsReportedCount: 1200,
+          exactItemCounts: { l1: 1150, l2: 50 },
+        });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        expect(result[0].itemCount).toBe(1150);
+        expect(result[1].itemCount).toBe(50);
+        expect(result[0].estimatedComparisons).toBe(2300);
+        // One exact count per list, on top of the batched attempt.
+        expect(fromCalls.filter((t) => t === 'list_items')).toHaveLength(3);
       });
 
       it('should short-circuit and skip batched queries when user has no lists', async () => {
