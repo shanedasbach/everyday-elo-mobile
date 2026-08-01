@@ -26,6 +26,12 @@ jest.mock('../supabase', () => ({
   },
 }));
 
+// Mock expo-crypto so tests run outside a native runtime. Default returns
+// deterministic bytes; individual tests override via mockImplementationOnce.
+jest.mock('expo-crypto', () => ({
+  getRandomBytes: jest.fn((n: number) => new Uint8Array(n).fill(0xff)),
+}));
+
 // Local partial-ranking storage is keychain-backed; stub it so deleteList's
 // cleanup hook is observable without touching SecureStore.
 jest.mock('../partial-ranking', () => ({
@@ -39,8 +45,10 @@ const mockClearPartialRanking = clearPartialRanking as jest.MockedFunction<
   typeof clearPartialRanking
 >;
 
+import * as Crypto from 'expo-crypto';
 import {
   createList,
+  generateShareCode,
   getList,
   getListByShareCode,
   getUserLists,
@@ -89,6 +97,15 @@ describe('API Module', () => {
     (mockSupabase.from as jest.Mock).mockReturnValue(chain);
     return chain;
   };
+
+  // The shape PostgREST actually returns for a share_code collision — the
+  // column name appears in both `message` (via the constraint) and `details`.
+  const shareCodeCollision = () => ({
+    code: '23505',
+    message: 'duplicate key value violates unique constraint "lists_share_code_key"',
+    details: 'Key (share_code)=(ABCD1234) already exists.',
+    hint: null,
+  });
 
   // ============================================
   // USE CASE 1: Creating a New List
@@ -156,6 +173,89 @@ describe('API Module', () => {
       });
     });
 
+    it('should retry with a new share_code on unique-violation and succeed', async () => {
+      // First insert collides (Postgres 23505), second succeeds. The two
+      // generateShareCode calls must produce different codes.
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes
+        .mockImplementationOnce(() => new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00]))
+        .mockImplementationOnce(() => new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
+
+      const successList = {
+        id: 'list-retry',
+        title: 'Retry List',
+        creator_id: 'user-123',
+        share_code: 'ZZZZZZZZ',
+        is_private: false,
+        is_template: false,
+        created_at: '',
+        updated_at: '',
+      };
+
+      const insertedCodes: string[] = [];
+      let attempt = 0;
+      const chain: any = {
+        select: jest.fn().mockReturnThis(),
+        insert: jest.fn((row: { share_code: string }) => {
+          insertedCodes.push(row.share_code);
+          return chain;
+        }),
+        single: jest.fn().mockImplementation(() => {
+          attempt++;
+          if (attempt === 1) {
+            return Promise.resolve({ data: null, error: shareCodeCollision() });
+          }
+          return Promise.resolve({ data: successList, error: null });
+        }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      const result = await createList({ title: 'Retry List' });
+
+      expect(result.id).toBe('list-retry');
+      expect(insertedCodes).toHaveLength(2);
+      expect(insertedCodes[0]).not.toBe(insertedCodes[1]);
+    });
+
+    it('should throw after exhausting share_code retry attempts', async () => {
+      const chain: any = {
+        select: jest.fn().mockReturnThis(),
+        insert: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({
+          data: null,
+          error: shareCodeCollision(),
+        }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await expect(createList({ title: 'Never Lucky' })).rejects.toEqual(
+        shareCodeCollision()
+      );
+      // Three attempts before giving up.
+      expect(chain.single).toHaveBeenCalledTimes(3);
+    });
+
+    it('should not retry a unique-violation on a different constraint', async () => {
+      // Retrying only regenerates the share code, so a unique violation on any
+      // other column fails identically every time — burning three inserts to
+      // surface the same error. Fail on the first one instead.
+      const otherConstraint = {
+        code: '23505',
+        message: 'duplicate key value violates unique constraint "lists_title_creator_key"',
+        details: 'Key (title, creator_id)=(Dupe, user-123) already exists.',
+        hint: null,
+      };
+      const chain: any = {
+        select: jest.fn().mockReturnThis(),
+        insert: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({ data: null, error: otherConstraint }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await expect(createList({ title: 'Dupe' })).rejects.toEqual(otherConstraint);
+      expect(chain.single).toHaveBeenCalledTimes(1);
+    });
+
     it('should send creator_id as the signed-in user, never undefined', async () => {
       const chain = mockQuery({ data: { id: 'list-abc' }, error: null });
 
@@ -163,6 +263,54 @@ describe('API Module', () => {
 
       const payload = chain.insert.mock.calls[0][0];
       expect(payload.creator_id).toBe('user-123');
+    });
+
+    it('should generate the share_code with crypto entropy, not generateId', async () => {
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes.mockClear();
+      const chain = mockQuery({ data: { id: 'list-abc' }, error: null });
+
+      await createList({ title: 'Shared List' });
+
+      expect(getRandomBytes).toHaveBeenCalledWith(5);
+      const payload = chain.insert.mock.calls[0][0];
+      expect(payload.share_code).toMatch(/^[0-9A-HJKMNP-TV-Z]{8}$/);
+    });
+  });
+
+  // ============================================
+  // Share Code Generation
+  // ============================================
+  describe('generateShareCode', () => {
+    afterEach(() => {
+      (Crypto.getRandomBytes as jest.Mock).mockReset();
+      // Restore the default deterministic mock so unrelated tests are unaffected.
+      (Crypto.getRandomBytes as jest.Mock).mockImplementation(
+        (n: number) => new Uint8Array(n).fill(0xff)
+      );
+    });
+
+    it('should produce an 8-character code using the share-code alphabet', () => {
+      const code = generateShareCode();
+      expect(code).toHaveLength(8);
+      expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]+$/);
+    });
+
+    it('should source entropy from expo-crypto (not Math.random)', () => {
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes.mockClear();
+      generateShareCode();
+      expect(getRandomBytes).toHaveBeenCalledWith(5);
+    });
+
+    it('should return different codes for different random bytes', () => {
+      const getRandomBytes = Crypto.getRandomBytes as jest.Mock;
+      getRandomBytes
+        .mockImplementationOnce(() => new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00]))
+        .mockImplementationOnce(() => new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff]));
+      const a = generateShareCode();
+      const b = generateShareCode();
+      expect(a).not.toBe(b);
     });
   });
 
