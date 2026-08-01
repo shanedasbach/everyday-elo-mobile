@@ -19,13 +19,25 @@ jest.mock('../supabase', () => ({
       getUser: jest.fn(),
     },
     from: jest.fn(),
+    rpc: jest.fn(),
     functions: {
       invoke: jest.fn(),
     },
   },
 }));
 
+// Local partial-ranking storage is keychain-backed; stub it so deleteList's
+// cleanup hook is observable without touching SecureStore.
+jest.mock('../partial-ranking', () => ({
+  clearPartialRanking: jest.fn().mockResolvedValue(undefined),
+}));
+
+import { clearPartialRanking } from '../partial-ranking';
+
 const mockSupabase = supabase as jest.Mocked<typeof supabase>;
+const mockClearPartialRanking = clearPartialRanking as jest.MockedFunction<
+  typeof clearPartialRanking
+>;
 
 import {
   createList,
@@ -49,6 +61,7 @@ import {
   recordComparison,
   getFeaturedLists,
   duplicateList,
+  NotAuthenticatedError,
   List,
   ListItem,
   Ranking,
@@ -141,6 +154,133 @@ describe('API Module', () => {
       await expect(createList({ title: 'Test' })).rejects.toEqual({
         message: 'Database connection failed',
       });
+    });
+
+    it('should send creator_id as the signed-in user, never undefined', async () => {
+      const chain = mockQuery({ data: { id: 'list-abc' }, error: null });
+
+      await createList({ title: 'Owned List' });
+
+      const payload = chain.insert.mock.calls[0][0];
+      expect(payload.creator_id).toBe('user-123');
+    });
+  });
+
+  // ============================================
+  // USE CASE 1b: List ownership (issue #65)
+  //
+  // `creator_id` is nullable and RLS permits anonymous inserts, so a list
+  // created without a session is both invisible to getUserLists (which
+  // filters on creator_id) and updatable by anyone. Being unowned therefore
+  // has to be an explicit request, not a silent fallback.
+  // ============================================
+  describe('List ownership', () => {
+    const signedOut = () => {
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: null },
+      });
+    };
+
+    it('should refuse to create a list when nobody is signed in', async () => {
+      signedOut();
+      const chain = mockQuery({ data: null, error: null });
+
+      await expect(createList({ title: 'Orphan' })).rejects.toBeInstanceOf(
+        NotAuthenticatedError
+      );
+      expect(chain.insert).not.toHaveBeenCalled();
+    });
+
+    it('should explain what to do in the error message', async () => {
+      signedOut();
+      mockQuery({ data: null, error: null });
+
+      await expect(createList({ title: 'Orphan' })).rejects.toThrow(
+        /signed in/i
+      );
+    });
+
+    it('should treat an auth lookup error as not signed in', async () => {
+      // An expired or revoked token surfaces here as an error rather than a
+      // null user. Both must fail closed — this is the case that would
+      // otherwise show "Saved! List saved to My Lists" for a list that will
+      // never appear there.
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: null },
+        error: { message: 'JWT expired' },
+      });
+      const chain = mockQuery({ data: null, error: null });
+
+      await expect(createList({ title: 'Stale Session' })).rejects.toBeInstanceOf(
+        NotAuthenticatedError
+      );
+      expect(chain.insert).not.toHaveBeenCalled();
+    });
+
+    it('should allow an explicitly anonymous list with a null creator_id', async () => {
+      signedOut();
+      const chain = mockQuery({
+        data: { id: 'list-anon', title: 'Try It Out', creator_id: null },
+        error: null,
+      });
+
+      const result = await createList({
+        title: 'Try It Out',
+        allowAnonymous: true,
+      });
+
+      expect(result.id).toBe('list-anon');
+      const payload = chain.insert.mock.calls[0][0];
+      expect(payload.creator_id).toBeNull();
+      expect('creator_id' in payload).toBe(true);
+    });
+
+    it('should still attach the owner when signed in and anonymous is allowed', async () => {
+      // allowAnonymous is a permission, not an instruction to discard a
+      // known owner — otherwise the ad hoc ranking flow would orphan lists
+      // for signed-in users too.
+      mockSupabase.auth.getUser = jest.fn().mockResolvedValue({
+        data: { user: { id: 'user-123' } },
+      });
+      const chain = mockQuery({ data: { id: 'list-abc' }, error: null });
+
+      await createList({ title: 'Ad Hoc', allowAnonymous: true });
+
+      expect(chain.insert.mock.calls[0][0].creator_id).toBe('user-123');
+    });
+
+    it('should refuse to duplicate a list when nobody is signed in', async () => {
+      signedOut();
+
+      const sourceList = {
+        id: 'source-list',
+        title: 'My Favorites',
+        creator_id: 'user-123',
+      };
+      let callIndex = 0;
+      const insertSpy = jest.fn().mockReturnThis();
+
+      (mockSupabase.from as jest.Mock).mockImplementation(() => {
+        const idx = callIndex++;
+        const chain: Record<string, jest.Mock> = {
+          select: jest.fn().mockReturnThis(),
+          insert: insertSpy,
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+          single: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
+        };
+        // getListItems uses order() as its terminal call
+        if (idx === 1) {
+          chain.order = jest.fn().mockResolvedValue({ data: [], error: null });
+        }
+        return chain;
+      });
+
+      await expect(duplicateList('source-list')).rejects.toBeInstanceOf(
+        NotAuthenticatedError
+      );
+      expect(insertSpy).not.toHaveBeenCalled();
     });
   });
 
@@ -339,36 +479,151 @@ describe('API Module', () => {
     });
 
     describe('bulk adding items', () => {
-      it('should add multiple items sequentially', async () => {
+      it('should insert all items in a single batch with monotonically increasing display_order', async () => {
         const items = [
-          { id: 'i1', list_id: 'l1', name: 'Item 1', display_order: 0, created_at: '' },
-          { id: 'i2', list_id: 'l1', name: 'Item 2', display_order: 1, created_at: '' },
-          { id: 'i3', list_id: 'l1', name: 'Item 3', display_order: 2, created_at: '' },
+          { id: 'i1', list_id: 'l1', name: 'Item 1', display_order: 5, created_at: '' },
+          { id: 'i2', list_id: 'l1', name: 'Item 2', display_order: 6, created_at: '' },
+          { id: 'i3', list_id: 'l1', name: 'Item 3', display_order: 7, created_at: '' },
         ];
 
-        let itemIndex = 0;
-        let orderQuery = 0;
-        const chain = {
+        let callIndex = 0;
+        const orderChain = {
           select: jest.fn().mockReturnThis(),
-          insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            const order = orderQuery;
-            orderQuery++;
-            return Promise.resolve({ data: order > 0 ? [{ display_order: order - 1 }] : [] });
-          }),
-          single: jest.fn().mockImplementation(() => {
-            const item = items[itemIndex];
-            itemIndex++;
-            return Promise.resolve({ data: item, error: null });
-          }),
+          limit: jest.fn().mockResolvedValue({ data: [{ display_order: 4 }] }),
         };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: items, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
 
         const result = await addListItems('l1', ['Item 1', 'Item 2', 'Item 3']);
 
         expect(result).toHaveLength(3);
+        expect(insertChain.insert).toHaveBeenCalledTimes(1);
+        expect(insertChain.insert).toHaveBeenCalledWith([
+          { list_id: 'l1', name: 'Item 1', display_order: 5 },
+          { list_id: 'l1', name: 'Item 2', display_order: 6 },
+          { list_id: 'l1', name: 'Item 3', display_order: 7 },
+        ]);
+      });
+
+      it('should start display_order at 0 when list is empty', async () => {
+        const items = [
+          { id: 'i1', list_id: 'l1', name: 'A', display_order: 0, created_at: '' },
+          { id: 'i2', list_id: 'l1', name: 'B', display_order: 1, created_at: '' },
+        ];
+
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: items, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        const result = await addListItems('l1', ['A', 'B']);
+
+        expect(result).toEqual(items);
+        expect(insertChain.insert).toHaveBeenCalledWith([
+          { list_id: 'l1', name: 'A', display_order: 0 },
+          { list_id: 'l1', name: 'B', display_order: 1 },
+        ]);
+      });
+
+      it('should handle null existing display_order data', async () => {
+        const items = [
+          { id: 'i1', list_id: 'l1', name: 'A', display_order: 0, created_at: '' },
+        ];
+
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: null }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: items, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        const result = await addListItems('l1', ['A']);
+
+        expect(result).toEqual(items);
+        expect(insertChain.insert).toHaveBeenCalledWith([
+          { list_id: 'l1', name: 'A', display_order: 0 },
+        ]);
+      });
+
+      it('should short-circuit and not call supabase for empty names array', async () => {
+        const result = await addListItems('l1', []);
+
+        expect(result).toEqual([]);
+        expect(mockSupabase.from).not.toHaveBeenCalled();
+      });
+
+      it('should propagate supabase insert errors', async () => {
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        await expect(addListItems('l1', ['A', 'B'])).rejects.toEqual({ message: 'RLS denied' });
+      });
+
+      it('should return empty array when insert returns null data', async () => {
+        let callIndex = 0;
+        const orderChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: [] }),
+        };
+        const insertChain = {
+          insert: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue({ data: null, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation(() => {
+          const chain = callIndex === 0 ? orderChain : insertChain;
+          callIndex++;
+          return chain;
+        });
+
+        const result = await addListItems('l1', ['A']);
+        expect(result).toEqual([]);
       });
     });
 
@@ -459,6 +714,92 @@ describe('API Module', () => {
 
         expect(result.id).toBe('ranking-new');
         expect(result.comparisons_count).toBe(0);
+        // Exactly two inserts: one for the ranking row, one batched ranked_items
+        expect(chain.insert).toHaveBeenCalledTimes(2);
+        expect(chain.insert).toHaveBeenNthCalledWith(2, [
+          { ranking_id: 'ranking-new', item_id: 'item-1', rating: 1500, comparisons: 0 },
+          { ranking_id: 'ranking-new', item_id: 'item-2', rating: 1500, comparisons: 0 },
+        ]);
+      });
+
+      it('should skip ranked_items insert when list has no items', async () => {
+        const newRanking = {
+          id: 'ranking-empty',
+          list_id: 'list-empty',
+          user_id: 'user-1',
+          is_complete: false,
+          comparisons_count: 0,
+          created_at: '',
+          updated_at: '',
+        };
+
+        let singleCalls = 0;
+        const chain = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockResolvedValue({ data: [], error: null }),
+          single: jest.fn().mockImplementation(() => {
+            singleCalls++;
+            if (singleCalls === 1) {
+              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
+            }
+            return Promise.resolve({ data: newRanking, error: null });
+          }),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await createRanking('list-empty', 'user-1');
+
+        // Only the ranking insert — no empty-array round-trip for ranked_items
+        expect(chain.insert).toHaveBeenCalledTimes(1);
+      });
+
+      it('should throw when ranked_items batch insert fails', async () => {
+        const newRanking = {
+          id: 'ranking-new',
+          list_id: 'list-1',
+          user_id: 'user-1',
+          is_complete: false,
+          comparisons_count: 0,
+          created_at: '',
+          updated_at: '',
+        };
+        const listItems = [{ id: 'item-1', display_order: 0 }];
+
+        let singleCalls = 0;
+        let insertCalls = 0;
+        const chain: {
+          select: jest.Mock;
+          insert: jest.Mock;
+          eq: jest.Mock;
+          order: jest.Mock;
+          single: jest.Mock;
+        } = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockResolvedValue({ data: listItems, error: null }),
+          single: jest.fn().mockImplementation(() => {
+            singleCalls++;
+            if (singleCalls === 1) {
+              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
+            }
+            return Promise.resolve({ data: newRanking, error: null });
+          }),
+        };
+        chain.insert.mockImplementation(() => {
+          insertCalls++;
+          // First insert is the ranking row (chained: .insert().select().single())
+          // Second insert is the awaited batched ranked_items insert
+          if (insertCalls === 2) {
+            return Promise.resolve({ error: { message: 'Batch insert failed' } });
+          }
+          return chain;
+        });
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await expect(createRanking('list-1', 'user-1')).rejects.toEqual({ message: 'Batch insert failed' });
       });
 
       it('should allow anonymous rankings (no user ID)', async () => {
@@ -739,31 +1080,32 @@ describe('API Module', () => {
   // USE CASE 6: Incrementing Comparison Count
   // ============================================
   describe('Incrementing Comparison Count', () => {
-    it('should increment count when ranking exists', async () => {
-      const chain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: { comparisons_count: 5 } }),
-      };
-      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+    it('should call the increment_comparisons_count RPC with the ranking id', async () => {
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
       await incrementComparisonsCount('ranking-1');
 
-      expect(chain.update).toHaveBeenCalled();
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
+      expect(mockSupabase.rpc).toHaveBeenCalledWith('increment_comparisons_count', {
+        p_ranking_id: 'ranking-1',
+      });
+      // No table-level read or update — the RPC does both atomically server-side.
+      expect(mockSupabase.from).not.toHaveBeenCalled();
     });
 
-    it('should handle missing ranking gracefully', async () => {
-      const chain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: null }),
-      };
-      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+    it('should resolve when the ranking does not exist (RPC is idempotent)', async () => {
+      // A missing ranking is not an error from the RPC's perspective — the
+      // UPDATE simply affects zero rows. We still expect the helper to resolve.
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
-      // Should not throw, just not update
       await expect(incrementComparisonsCount('nonexistent')).resolves.toBeUndefined();
+    });
+
+    it('should surface RPC errors instead of swallowing them', async () => {
+      const rpcError = { message: 'RLS denied', code: '42501' };
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: rpcError });
+
+      await expect(incrementComparisonsCount('ranking-1')).rejects.toEqual(rpcError);
     });
   });
 
@@ -810,35 +1152,53 @@ describe('API Module', () => {
     });
 
     describe('featured lists', () => {
-      // Builds a mock where the first call to from() returns the featured-list
-      // chain, and subsequent calls return the batched-count chain. Counts the
-      // total number of `from()` invocations so we can assert it stays constant.
+      // Count queries are paged (see countRowsByListId), so the count chains
+      // honour `.range(from, to)` against the row set they were given — that is
+      // what makes the truncation test below meaningful rather than decorative.
+      const makeCountChain = (rows: Array<{ list_id: string }> | null, error: any = null) => {
+        const chain: any = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockReturnThis(),
+          range: jest.fn((from: number, to: number) =>
+            Promise.resolve(
+              error ? { data: null, error } : { data: rows && rows.slice(from, to + 1), error: null }
+            )
+          ),
+        };
+        return chain;
+      };
+
+      // Builds a mock where from('featured_lists') returns the featured chain,
+      // from('list_items')/from('rankings') return paged count chains, and
+      // from('profiles') returns the batched creator-name lookup. Every call
+      // goes through mockSupabase.from, so its call count is the round-trip count.
       const setupFeaturedMock = (
         featuredData: any,
         featuredError: any,
-        itemRows: Array<{ list_id: string }> = [],
-        rankingRows: Array<{ list_id: string }> = [],
+        itemRows: Array<{ list_id: string }> | null = [],
+        rankingRows: Array<{ list_id: string }> | null = [],
+        profileRows: Array<{ id: string; name: string }> | null = [],
+        profilesError: any = null,
       ) => {
         const featuredChain = {
           select: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockResolvedValue({ data: featuredData, error: featuredError }),
         };
-        const itemsChain = {
+        const itemsChain = makeCountChain(itemRows);
+        const rankingsChain = makeCountChain(rankingRows);
+        const profilesChain = {
           select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockResolvedValue({ data: itemRows, error: null }),
-        };
-        const rankingsChain = {
-          select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockResolvedValue({ data: rankingRows, error: null }),
+          in: jest.fn().mockResolvedValue({ data: profileRows, error: profilesError }),
         };
         (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
           if (table === 'featured_lists') return featuredChain;
           if (table === 'list_items') return itemsChain;
           if (table === 'rankings') return rankingsChain;
+          if (table === 'profiles') return profilesChain;
           throw new Error(`Unexpected table: ${table}`);
         });
-        return { featuredChain, itemsChain, rankingsChain };
+        return { featuredChain, itemsChain, rankingsChain, profilesChain };
       };
 
       it('should return featured lists with metadata', async () => {
@@ -955,20 +1315,31 @@ describe('API Module', () => {
             lists: { id: 'list-1', title: 'List', description: '' },
           },
         ];
+        setupFeaturedMock(featured, null, null, null);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].item_count).toBe(0);
+        expect(result[0].ranking_count).toBe(0);
+      });
+
+      it('should keep the lists when a count query fails, rather than failing the screen', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List', description: '' },
+          },
+        ];
         const featuredChain = {
           select: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
         };
-        // Both batched queries return data: null (not an empty array)
-        const itemsChain = {
-          select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockResolvedValue({ data: null, error: null }),
-        };
-        const rankingsChain = {
-          select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockResolvedValue({ data: null, error: null }),
-        };
+        const itemsChain = makeCountChain(null, { message: 'items exploded' });
+        const rankingsChain = makeCountChain([{ list_id: 'list-1' }]);
         (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
           if (table === 'featured_lists') return featuredChain;
           if (table === 'list_items') return itemsChain;
@@ -980,43 +1351,233 @@ describe('API Module', () => {
 
         expect(result).toHaveLength(1);
         expect(result[0].item_count).toBe(0);
-        expect(result[0].ranking_count).toBe(0);
+        expect(result[0].ranking_count).toBe(1);
+      });
+
+      // Regression guard for the silent-truncation defect: PostgREST caps a
+      // single select at db-max-rows (1000 by default) and truncates with no
+      // error, so counting one unbounded response under-reports as soon as a
+      // popular featured list crosses the cap.
+      it('should count past the 1000-row PostgREST page cap instead of under-reporting', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Popular', description: '' },
+          },
+        ];
+        const rankingRows = Array.from({ length: 1500 }, () => ({ list_id: 'list-1' }));
+        const { rankingsChain } = setupFeaturedMock(featured, null, [], rankingRows);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(1500);
+        // Two pages: [0, 999] then [1000, 1999], which comes back short and stops.
+        expect(rankingsChain.range).toHaveBeenCalledTimes(2);
+        expect(rankingsChain.range).toHaveBeenNthCalledWith(1, 0, 999);
+        expect(rankingsChain.range).toHaveBeenNthCalledWith(2, 1000, 1999);
+      });
+
+      it('should stop paging at the backstop rather than looping forever', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Popular', description: '' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        // A server that ignores `.range()` and always hands back a full page —
+        // without the page cap this would never terminate.
+        const fullPage = Array.from({ length: 1000 }, () => ({ list_id: 'list-1' }));
+        const runawayChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockReturnThis(),
+          range: jest.fn().mockResolvedValue({ data: fullPage, error: null }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          return runawayChain;
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(runawayChain.range).toHaveBeenCalledTimes(200); // 100 pages × 2 tables
+        expect(result[0].item_count).toBe(100000);
+        expect(result[0].ranking_count).toBe(100000);
+      });
+
+      it('should populate creator_name from a single batched profiles query', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+          {
+            id: 'f2',
+            list_id: 'list-2',
+            featured_at: '2024-01-02T00:00:00Z',
+            // Two lists by the same creator — should resolve to one batched lookup.
+            lists: { id: 'list-2', title: 'List Two', description: 'd2', creator_id: 'user-1' },
+          },
+          {
+            id: 'f3',
+            list_id: 'list-3',
+            featured_at: '2024-01-03T00:00:00Z',
+            lists: { id: 'list-3', title: 'List Three', description: 'd3', creator_id: 'user-2' },
+          },
+        ];
+        const { profilesChain } = setupFeaturedMock(featured, null, [], [], [
+          { id: 'user-1', name: 'Alice' },
+          { id: 'user-2', name: 'Bob' },
+        ]);
+
+        const result = await getFeaturedLists();
+
+        expect(result.map((r) => r.creator_name)).toEqual(['Alice', 'Alice', 'Bob']);
+        // One profiles query, with deduped creator ids.
+        expect(mockSupabase.from).toHaveBeenCalledWith('profiles');
+        expect(profilesChain.select).toHaveBeenCalledTimes(1);
+        expect(profilesChain.in).toHaveBeenCalledWith('id', ['user-1', 'user-2']);
+      });
+
+      it('should leave creator_name undefined when a creator has no profile match', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'ghost' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], [], []);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should ignore profile rows with a missing id or name', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], [], [{ id: 'user-1', name: '' } as any]);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should treat null profile data as no names', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], [], null);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should not throw and still return lists when the profiles query errors', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], [], null, { message: 'boom' });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].title).toBe('List One');
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should not query profiles when no creator ids are present', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], []);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(mockSupabase.from).not.toHaveBeenCalledWith('profiles');
       });
 
       // Acceptance criteria: query count must be constant regardless of N.
-      const expectConstantQueryCount = async (n: number) => {
+      // Asserting the equality of two sizes rather than a literal, so that a
+      // future query added to this function does not turn the AC into a false
+      // failure while still catching any per-list round-trip creeping back in.
+      const queryCountFor = async (n: number) => {
         const featured = Array.from({ length: n }, (_, i) => ({
           id: `f${i}`,
           list_id: `list-${i}`,
           featured_at: '2024-01-01T00:00:00Z',
-          lists: { id: `list-${i}`, title: `List ${i}`, description: '' },
+          lists: { id: `list-${i}`, title: `List ${i}`, description: '', creator_id: `user-${i}` },
         }));
         // Give every list one item and one ranking
         const itemRows = featured.map((f) => ({ list_id: f.list_id }));
         const rankingRows = featured.map((f) => ({ list_id: f.list_id }));
-        setupFeaturedMock(featured, null, itemRows, rankingRows);
+        const profileRows = featured.map((_, i) => ({ id: `user-${i}`, name: `User ${i}` }));
+        setupFeaturedMock(featured, null, itemRows, rankingRows, profileRows);
 
         const result = await getFeaturedLists();
 
         expect(result).toHaveLength(n);
-        // Exactly 3 calls: featured_lists, list_items, rankings — regardless of N
-        expect(mockSupabase.from).toHaveBeenCalledTimes(3);
+        result.forEach((r, i) => {
+          expect(r.item_count).toBe(1);
+          expect(r.ranking_count).toBe(1);
+          expect(r.creator_name).toBe(`User ${i}`);
+        });
+        return (mockSupabase.from as jest.Mock).mock.calls.length;
+      };
+
+      it('should issue the same number of queries for N=5 and N=20', async () => {
+        const smallN = await queryCountFor(5);
+        jest.clearAllMocks();
+        const largeN = await queryCountFor(20);
+
+        expect(largeN).toBe(smallN);
+        // And it is a handful of table reads, not a per-list round-trip.
+        expect(largeN).toBeLessThanOrEqual(4);
+      });
+
+      it('should read each table exactly once for a normal page of results', async () => {
+        await queryCountFor(20);
+
         expect(mockSupabase.from).toHaveBeenCalledWith('featured_lists');
         expect(mockSupabase.from).toHaveBeenCalledWith('list_items');
         expect(mockSupabase.from).toHaveBeenCalledWith('rankings');
-        // Counts should match
-        result.forEach((r) => {
-          expect(r.item_count).toBe(1);
-          expect(r.ranking_count).toBe(1);
-        });
-      };
-
-      it('should issue exactly 3 queries regardless of result size (N=5)', async () => {
-        await expectConstantQueryCount(5);
-      });
-
-      it('should issue exactly 3 queries regardless of result size (N=20)', async () => {
-        await expectConstantQueryCount(20);
+        expect(mockSupabase.from).toHaveBeenCalledWith('profiles');
       });
     });
   });
@@ -1063,46 +1624,65 @@ describe('API Module', () => {
     });
 
     describe('getting lists with ranking status', () => {
-      it('should show "not_started" when no ranking exists', async () => {
-        const lists = [{ id: 'l1', title: 'Unranked List' }];
-        const items = [{ id: 'i1' }, { id: 'i2' }];
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+      // Mock builder that routes calls by table name. Tracks total .from() calls so
+      // tests can assert the query count is constant regardless of list count.
+      const buildMock = (opts: {
+        lists: any[];
+        items?: any[];
+        rankings?: any[];
+      }) => {
+        const fromCalls: string[] = [];
+        const chainFor = (table: string) => {
+          if (table === 'lists') {
+            return {
+              select: jest.fn().mockReturnThis(),
+              eq: jest.fn().mockReturnThis(),
+              order: jest.fn().mockResolvedValue({ data: opts.lists, error: null }),
+            };
+          }
+          if (table === 'list_items') {
+            return {
+              select: jest.fn().mockReturnThis(),
+              in: jest.fn().mockResolvedValue({ data: opts.items ?? [], error: null }),
+            };
+          }
+          if (table === 'rankings') {
+            const chain: any = {
+              select: jest.fn().mockReturnThis(),
+              in: jest.fn().mockReturnThis(),
+              eq: jest.fn().mockResolvedValue({ data: opts.rankings ?? [], error: null }),
+            };
+            return chain;
+          }
+          return {};
         };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          fromCalls.push(table);
+          return chainFor(table);
+        });
+        return { fromCalls };
+      };
+
+      it('should show "not_started" when no ranking exists', async () => {
+        buildMock({
+          lists: [{ id: 'l1', title: 'Unranked List' }],
+          items: [{ list_id: 'l1' }, { list_id: 'l1' }],
+          rankings: [],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
         expect(result[0].rankingStatus).toBe('not_started');
         expect(result[0].itemCount).toBe(2);
+        expect(result[0].comparisonsCount).toBe(0);
       });
 
       it('should show "in_progress" when ranking is incomplete', async () => {
-        const lists = [{ id: 'l1', title: 'In Progress' }];
-        const items = [{ id: 'i1' }];
-        const ranking = { is_complete: false, comparisons_count: 5 };
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: ranking }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        buildMock({
+          lists: [{ id: 'l1', title: 'In Progress' }],
+          items: [{ list_id: 'l1' }],
+          rankings: [{ list_id: 'l1', comparisons_count: 5, is_complete: false }],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
@@ -1111,49 +1691,94 @@ describe('API Module', () => {
       });
 
       it('should show "completed" when ranking is done', async () => {
-        const lists = [{ id: 'l1', title: 'Done' }];
-        const items = [{ id: 'i1' }];
-        const ranking = { is_complete: true, comparisons_count: 10 };
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: ranking }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        buildMock({
+          lists: [{ id: 'l1', title: 'Done' }],
+          items: [{ list_id: 'l1' }],
+          rankings: [{ list_id: 'l1', comparisons_count: 10, is_complete: true }],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
         expect(result[0].rankingStatus).toBe('completed');
+        expect(result[0].comparisonsCount).toBe(10);
       });
 
       it('should calculate estimated comparisons based on item count', async () => {
-        const lists = [{ id: 'l1', title: 'Test' }];
-        const items = [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }];
-
-        let queryCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            queryCount++;
-            if (queryCount === 1) return Promise.resolve({ data: lists });
-            return Promise.resolve({ data: items });
-          }),
-          single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        buildMock({
+          lists: [{ id: 'l1', title: 'Test' }],
+          items: [
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+            { list_id: 'l1' },
+          ],
+          rankings: [],
+        });
 
         const result = await getUserListsWithStatus('user-1');
 
         // 5 items * 2 = 10 estimated comparisons
         expect(result[0].estimatedComparisons).toBe(10);
+      });
+
+      it('should issue a constant number of queries for N=3 lists', async () => {
+        const lists = [
+          { id: 'l1', title: 'A' },
+          { id: 'l2', title: 'B' },
+          { id: 'l3', title: 'C' },
+        ];
+        const items = [
+          { list_id: 'l1' },
+          { list_id: 'l2' }, { list_id: 'l2' },
+          { list_id: 'l3' }, { list_id: 'l3' }, { list_id: 'l3' },
+        ];
+        const rankings = [
+          { list_id: 'l1', comparisons_count: 2, is_complete: false },
+          { list_id: 'l3', comparisons_count: 9, is_complete: true },
+        ];
+        const { fromCalls } = buildMock({ lists, items, rankings });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        // Exactly 3 queries: 1 lists + 1 list_items + 1 rankings
+        expect(fromCalls).toEqual(['lists', 'list_items', 'rankings']);
+        expect(result).toHaveLength(3);
+        expect(result[0].itemCount).toBe(1);
+        expect(result[1].itemCount).toBe(2);
+        expect(result[2].itemCount).toBe(3);
+        expect(result[0].rankingStatus).toBe('in_progress');
+        expect(result[1].rankingStatus).toBe('not_started');
+        expect(result[2].rankingStatus).toBe('completed');
+      });
+
+      it('should issue a constant number of queries for N=10 lists', async () => {
+        const lists = Array.from({ length: 10 }, (_, i) => ({ id: `l${i}`, title: `List ${i}` }));
+        const items = lists.flatMap((l) => [{ list_id: l.id }, { list_id: l.id }]);
+        const rankings = lists.map((l, i) => ({
+          list_id: l.id,
+          comparisons_count: i,
+          is_complete: i % 2 === 0,
+        }));
+        const { fromCalls } = buildMock({ lists, items, rankings });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        // Still exactly 3 queries — proves O(1) round-trips regardless of list count
+        expect(fromCalls).toEqual(['lists', 'list_items', 'rankings']);
+        expect(result).toHaveLength(10);
+        // Every list has 2 items, so estimatedComparisons == 4
+        result.forEach((r) => expect(r.estimatedComparisons).toBe(4));
+      });
+
+      it('should short-circuit and skip batched queries when user has no lists', async () => {
+        const { fromCalls } = buildMock({ lists: [] });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        expect(result).toEqual([]);
+        // No need to hit list_items or rankings when there are no lists
+        expect(fromCalls).toEqual(['lists']);
       });
     });
   });
@@ -1181,6 +1806,46 @@ describe('API Module', () => {
       (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
       await expect(deleteList('nonexistent')).rejects.toEqual({ message: 'List not found' });
+    });
+
+    it('should clear the local partial ranking for the deleted list', async () => {
+      const chain = {
+        delete: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: null }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await deleteList('list-123');
+
+      expect(mockClearPartialRanking).toHaveBeenCalledWith('list-123');
+    });
+
+    it('should not clear local storage when the remote delete fails', async () => {
+      const chain = {
+        delete: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: { message: 'List not found' } }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+      await expect(deleteList('list-123')).rejects.toBeDefined();
+
+      expect(mockClearPartialRanking).not.toHaveBeenCalled();
+    });
+
+    it('should still resolve when clearing local storage fails', async () => {
+      const chain = {
+        delete: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: null }),
+      };
+      (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+      mockClearPartialRanking.mockRejectedValueOnce(new Error('keychain unavailable'));
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      // The remote row is already gone — surfacing the local failure would
+      // wrongly tell the caller the list still exists.
+      await expect(deleteList('list-123')).resolves.toBeUndefined();
+
+      consoleSpy.mockRestore();
     });
   });
 
@@ -1302,16 +1967,13 @@ describe('API Module', () => {
       // 0: getList         → from('lists').select().eq().single()
       // 1: getListItems    → from('list_items').select().eq().order()  [terminal]
       // 2: createList      → from('lists').insert().select().single()
-      // 3,5: addListItem order-check → from('list_items').select().eq().order().limit() [terminal]
-      // 4,6: addListItem insert      → from('list_items').insert().select().single()
+      // 3: addListItems order-check → from('list_items').select().eq().order().limit() [terminal]
+      // 4: addListItems batch insert → from('list_items').insert().select() [terminal]
       let callIndex = 0;
-      let limitCallIndex = 0;
       let singleCallIndex = 0;
       const singleResults = [
         { data: sourceList, error: null },   // getList
         { data: copiedList, error: null },   // createList
-        { data: sourceItems[0], error: null }, // addListItem item 1 insert
-        { data: sourceItems[1], error: null }, // addListItem item 2 insert
       ];
 
       (mockSupabase.from as jest.Mock).mockImplementation(() => {
@@ -1321,10 +1983,7 @@ describe('API Module', () => {
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            limitCallIndex++;
-            return Promise.resolve({ data: [] }); // no existing items for order check
-          }),
+          limit: jest.fn().mockResolvedValue({ data: [] }), // no existing items for order check
           single: jest.fn().mockImplementation(() => {
             const result = singleResults[singleCallIndex];
             singleCallIndex++;
@@ -1334,6 +1993,10 @@ describe('API Module', () => {
         // getListItems (idx 1) uses order() as terminal
         if (idx === 1) {
           chain.order = jest.fn().mockResolvedValue({ data: sourceItems, error: null });
+        }
+        // batch insert (idx 4) uses select() as terminal
+        if (idx === 4) {
+          chain.select = jest.fn().mockResolvedValue({ data: sourceItems, error: null });
         }
         return chain;
       });

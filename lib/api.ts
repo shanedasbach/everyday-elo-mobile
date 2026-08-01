@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { clearPartialRanking } from './partial-ranking';
 
 // Types
 export interface List {
@@ -53,6 +54,33 @@ function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
 
+/**
+ * Thrown when an operation needs an owner but no valid session is available.
+ * Call sites can catch this specifically to prompt for sign-in rather than
+ * showing a generic failure.
+ */
+export class NotAuthenticatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotAuthenticatedError';
+  }
+}
+
+/**
+ * Resolve the signed-in user's id, or null if there isn't one.
+ *
+ * `supabase.auth.getUser()` validates the stored token against the server, so
+ * this returns null when a session has expired or been revoked even though the
+ * in-memory auth context still holds a user. Anything that needs an owner must
+ * go through here instead of reading `user?.id` optimistically — see
+ * `createList`.
+ */
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) return null;
+  return data?.user?.id ?? null;
+}
+
 // ============================================
 // LISTS
 // ============================================
@@ -62,16 +90,34 @@ export async function createList(data: {
   description?: string;
   comparison_prompt?: string;
   is_private?: boolean;
+  /**
+   * Permit creating a list with no owner (`creator_id: null`).
+   *
+   * Only the "rank something without an account" flow should set this. An
+   * unowned list never comes back from `getUserLists` (which filters on
+   * creator_id) and, under the current RLS policy, is updatable by anyone —
+   * so it has to be a deliberate choice at the call site, never a silent
+   * fallback when the session turns out to be missing.
+   */
+  allowAnonymous?: boolean;
 }): Promise<List> {
-  const { data: { user } } = await supabase.auth.getUser();
-  
+  const userId = await getAuthenticatedUserId();
+
+  if (!userId && !data.allowAnonymous) {
+    throw new NotAuthenticatedError(
+      'You must be signed in to create a list. Please sign in and try again.'
+    );
+  }
+
   const { data: list, error } = await supabase
     .from('lists')
     .insert({
       title: data.title,
       description: data.description,
       comparison_prompt: data.comparison_prompt,
-      creator_id: user?.id,
+      // Explicitly null rather than undefined, so an unowned list is a stated
+      // intent in the payload instead of an omitted column.
+      creator_id: userId,
       is_private: data.is_private || false,
       share_code: generateId().slice(0, 8),
     })
@@ -117,43 +163,55 @@ export async function getUserLists(userId: string): Promise<List[]> {
 
 export async function getUserListsWithStatus(userId: string): Promise<ListWithStatus[]> {
   const lists = await getUserLists(userId);
-  const listsWithStatus: ListWithStatus[] = [];
+  if (lists.length === 0) return [];
 
-  for (const list of lists) {
-    const items = await getListItems(list.id);
-    const itemCount = items.length;
-    
-    // Get user's ranking for this list
-    const { data: ranking } = await supabase
+  const listIds = lists.map((l) => l.id);
+
+  // Batch-fetch items and rankings for all lists in two queries, regardless of N.
+  // Total round-trips: 1 lists + 1 items + 1 rankings.
+  const [itemsRes, rankingsRes] = await Promise.all([
+    supabase.from('list_items').select('list_id').in('list_id', listIds),
+    supabase
       .from('rankings')
-      .select('*')
-      .eq('list_id', list.id)
-      .eq('user_id', userId)
-      .single();
+      .select('list_id, comparisons_count, is_complete')
+      .in('list_id', listIds)
+      .eq('user_id', userId),
+  ]);
 
+  const itemCounts = new Map<string, number>();
+  for (const row of itemsRes.data || []) {
+    const id = (row as any).list_id;
+    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
+  }
+
+  const rankingsByList = new Map<string, { comparisons_count: number; is_complete: boolean }>();
+  for (const row of rankingsRes.data || []) {
+    const id = (row as any).list_id;
+    rankingsByList.set(id, {
+      comparisons_count: (row as any).comparisons_count,
+      is_complete: (row as any).is_complete,
+    });
+  }
+
+  return lists.map((list) => {
+    const itemCount = itemCounts.get(list.id) || 0;
+    const ranking = rankingsByList.get(list.id);
     let status: 'not_started' | 'in_progress' | 'completed' = 'not_started';
     let comparisonsCount = 0;
-    const estimatedComparisons = itemCount * 2;
 
     if (ranking) {
       comparisonsCount = ranking.comparisons_count;
-      if (ranking.is_complete) {
-        status = 'completed';
-      } else {
-        status = 'in_progress';
-      }
+      status = ranking.is_complete ? 'completed' : 'in_progress';
     }
 
-    listsWithStatus.push({
+    return {
       ...list,
       itemCount,
       rankingStatus: status,
       comparisonsCount,
-      estimatedComparisons,
-    });
-  }
-
-  return listsWithStatus;
+      estimatedComparisons: itemCount * 2,
+    };
+  });
 }
 
 export async function getTemplateLists(): Promise<List[]> {
@@ -176,6 +234,57 @@ export interface FeaturedList {
   item_count: number;
   ranking_count: number;
   creator_name?: string;
+}
+
+// PostgREST caps the rows any single select may return (`db-max-rows`, 1000 by
+// default) and truncates the response *silently* — no error, no signal. So a
+// single `.in('list_id', …)` fetch cannot be trusted to have seen every row, and
+// counting its results in JS would under-report exactly as the table grows.
+// `rankings` is the exposed one here: it spans every user who has ranked a
+// featured list, and featured lists are by definition the popular ones.
+//
+// Page explicitly instead. Page size is a property of the table's size, not of
+// how many lists were requested, so round-trips stay constant in N — which is
+// what issue #29 asks for — while the counts stay exact.
+const COUNT_PAGE_SIZE = 1000;
+// Backstop so a server that ignores `.range()` cannot spin this forever.
+const MAX_COUNT_PAGES = 100;
+
+async function countRowsByListId(
+  table: 'list_items' | 'rankings',
+  listIds: string[]
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+
+  for (let page = 0; page < MAX_COUNT_PAGES; page++) {
+    const from = page * COUNT_PAGE_SIZE;
+    const { data, error } = await supabase
+      .from(table)
+      .select('list_id')
+      .in('list_id', listIds)
+      .range(from, from + COUNT_PAGE_SIZE - 1);
+
+    if (error) {
+      // Match getFeaturedLists' tolerance for a missing/failing table: report
+      // it rather than failing the whole browse screen. Loud, not silent.
+      console.log(`Counts for ${table} not available:`, error.message);
+      return counts;
+    }
+
+    const rows = data || [];
+    for (const row of rows) {
+      const id = (row as any).list_id;
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+
+    // A short page means the server had nothing more to give.
+    if (rows.length < COUNT_PAGE_SIZE) return counts;
+  }
+
+  console.log(
+    `Counts for ${table} truncated at ${MAX_COUNT_PAGES * COUNT_PAGE_SIZE} rows`
+  );
+  return counts;
 }
 
 export async function getFeaturedLists(): Promise<FeaturedList[]> {
@@ -205,27 +314,24 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
 
   const listIds = validRows.map((row) => ((row as any).lists as any).id);
 
-  // Batch-fetch all list_id values in a single query per table, then count in JS.
-  // Keeps total round-trips constant (1 featured + 1 items + 1 rankings) regardless of N.
-  const [itemsRes, rankingsRes] = await Promise.all([
-    supabase.from('list_items').select('list_id').in('list_id', listIds),
-    supabase.from('rankings').select('list_id').in('list_id', listIds),
+  // Batch-count both tables for every featured list at once. Round-trips no
+  // longer grow with the number of featured lists — see countRowsByListId for
+  // why each count is paged rather than fetched in one unbounded select.
+  const [itemCounts, rankingCounts] = await Promise.all([
+    countRowsByListId('list_items', listIds),
+    countRowsByListId('rankings', listIds),
   ]);
 
-  const itemCounts = new Map<string, number>();
-  for (const row of itemsRes.data || []) {
-    const id = (row as any).list_id;
-    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
-  }
-
-  const rankingCounts = new Map<string, number>();
-  for (const row of rankingsRes.data || []) {
-    const id = (row as any).list_id;
-    rankingCounts.set(id, (rankingCounts.get(id) || 0) + 1);
-  }
-
-  return validRows.map((row) => {
+  // Track each list's creator so names can be resolved in a single batched
+  // query afterwards (avoids a per-list round-trip).
+  const creatorIdByListId = new Map<string, string>();
+  const featured: FeaturedList[] = validRows.map((row) => {
     const list = (row as any).lists as any;
+
+    if (list.creator_id) {
+      creatorIdByListId.set(list.id, list.creator_id);
+    }
+
     return {
       id: (row as any).id,
       list_id: list.id,
@@ -236,6 +342,35 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       ranking_count: rankingCounts.get(list.id) || 0,
     };
   });
+
+  // Resolve creator display names in a single batched query, then map onto
+  // each featured list. Unresolved creators simply leave creator_name undefined.
+  const creatorIds = Array.from(new Set(creatorIdByListId.values()));
+  if (creatorIds.length > 0) {
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, name')
+      .in('id', creatorIds);
+
+    if (profilesError) {
+      console.log('Creator names not available:', profilesError.message);
+    } else {
+      const nameById = new Map<string, string>();
+      for (const profile of profiles || []) {
+        if (profile?.id && profile.name) {
+          nameById.set(profile.id, profile.name);
+        }
+      }
+      for (const entry of featured) {
+        const creatorId = creatorIdByListId.get(entry.list_id);
+        if (creatorId) {
+          entry.creator_name = nameById.get(creatorId);
+        }
+      }
+    }
+  }
+
+  return featured;
 }
 
 export async function deleteList(id: string): Promise<void> {
@@ -245,6 +380,16 @@ export async function deleteList(id: string): Promise<void> {
     .eq('id', id);
 
   if (error) throw error;
+
+  // The list id is the only handle on its local partial ranking; once the row
+  // is gone nothing can ever discover that key again, so clear it here.
+  // Best-effort: the remote delete already succeeded, and failing the call
+  // would tell the caller the list still exists.
+  try {
+    await clearPartialRanking(id);
+  } catch (localError) {
+    console.error('Failed to clear partial ranking for deleted list:', localError);
+  }
 }
 
 // ============================================
@@ -288,12 +433,30 @@ export async function addListItem(listId: string, name: string): Promise<ListIte
 }
 
 export async function addListItems(listId: string, names: string[]): Promise<ListItem[]> {
-  const items: ListItem[] = [];
-  for (let i = 0; i < names.length; i++) {
-    const item = await addListItem(listId, names[i]);
-    items.push(item);
-  }
-  return items;
+  if (names.length === 0) return [];
+
+  const { data: existing } = await supabase
+    .from('list_items')
+    .select('display_order')
+    .eq('list_id', listId)
+    .order('display_order', { ascending: false })
+    .limit(1);
+
+  const maxOrder = existing?.[0]?.display_order ?? -1;
+
+  const rows = names.map((name, i) => ({
+    list_id: listId,
+    name,
+    display_order: maxOrder + 1 + i,
+  }));
+
+  const { data, error } = await supabase
+    .from('list_items')
+    .insert(rows)
+    .select();
+
+  if (error) throw error;
+  return data || [];
 }
 
 export async function deleteListItem(id: string): Promise<void> {
@@ -338,13 +501,15 @@ export async function createRanking(listId: string, userId?: string): Promise<Ra
 
   // Initialize ranked items
   const items = await getListItems(listId);
-  for (const item of items) {
-    await supabase.from('ranked_items').insert({
+  if (items.length > 0) {
+    const rows = items.map((item) => ({
       ranking_id: ranking.id,
       item_id: item.id,
       rating: 1500,
       comparisons: 0,
-    });
+    }));
+    const { error: insertError } = await supabase.from('ranked_items').insert(rows);
+    if (insertError) throw insertError;
   }
 
   return ranking;
@@ -412,21 +577,13 @@ export async function updateRankedItem(
 }
 
 export async function incrementComparisonsCount(rankingId: string): Promise<void> {
-  const { data: ranking } = await supabase
-    .from('rankings')
-    .select('comparisons_count')
-    .eq('id', rankingId)
-    .single();
+  // Atomic increment via RPC — see supabase/migrations/20260523000000_increment_comparisons_count.sql.
+  // A read-then-update would race when concurrent comparisons land on the same ranking.
+  const { error } = await supabase.rpc('increment_comparisons_count', {
+    p_ranking_id: rankingId,
+  });
 
-  if (ranking) {
-    await supabase
-      .from('rankings')
-      .update({ 
-        comparisons_count: ranking.comparisons_count + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', rankingId);
-  }
+  if (error) throw error;
 }
 
 export async function markRankingComplete(rankingId: string): Promise<void> {
