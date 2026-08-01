@@ -103,6 +103,16 @@ describe('initMonitoring', () => {
     expect(mod.isMonitoringEnabled()).toBe(true);
     expect(Sentry.init).toHaveBeenCalledTimes(1);
   });
+
+  it('treats an undefined __DEV__ as production rather than throwing', () => {
+    process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
+    let mod!: MonitoringModule;
+    jest.isolateModules(() => {
+      delete (global as unknown as { __DEV__?: boolean }).__DEV__;
+      mod = require('../monitoring');
+    });
+    expect(mod.initMonitoring()).toBe('enabled');
+  });
 });
 
 describe('captureException', () => {
