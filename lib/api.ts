@@ -1,5 +1,7 @@
+import type { PostgrestError } from '@supabase/supabase-js';
 import * as Crypto from 'expo-crypto';
 import { supabase } from './supabase';
+import { clearPartialRanking } from './partial-ranking';
 
 // Types
 export interface List {
@@ -82,6 +84,49 @@ const SHARE_CODE_MAX_ATTEMPTS = 3;
 // Postgres unique_violation; surfaced by PostgREST via the `code` field.
 const PG_UNIQUE_VIOLATION = '23505';
 
+/**
+ * True only for a unique-violation on `lists.share_code`.
+ *
+ * Retrying is only ever the right response to a share-code collision: a
+ * different unique constraint on `lists` would fail identically on every
+ * attempt, so a bare `code === '23505'` check would burn all three inserts
+ * before surfacing the same error. Postgres names the column in both fields —
+ * `message` carries the constraint (`lists_share_code_key`) and `details`
+ * carries `Key (share_code)=(…) already exists.` — so matching either is
+ * enough, and matching both tolerates a renamed constraint.
+ */
+function isShareCodeCollision(error: PostgrestError): boolean {
+  if (error.code !== PG_UNIQUE_VIOLATION) return false;
+  return `${error.message ?? ''} ${error.details ?? ''}`.includes('share_code');
+}
+
+/**
+ * Thrown when an operation needs an owner but no valid session is available.
+ * Call sites can catch this specifically to prompt for sign-in rather than
+ * showing a generic failure.
+ */
+export class NotAuthenticatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotAuthenticatedError';
+  }
+}
+
+/**
+ * Resolve the signed-in user's id, or null if there isn't one.
+ *
+ * `supabase.auth.getUser()` validates the stored token against the server, so
+ * this returns null when a session has expired or been revoked even though the
+ * in-memory auth context still holds a user. Anything that needs an owner must
+ * go through here instead of reading `user?.id` optimistically — see
+ * `createList`.
+ */
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) return null;
+  return data?.user?.id ?? null;
+}
+
 // ============================================
 // LISTS
 // ============================================
@@ -91,10 +136,26 @@ export async function createList(data: {
   description?: string;
   comparison_prompt?: string;
   is_private?: boolean;
+  /**
+   * Permit creating a list with no owner (`creator_id: null`).
+   *
+   * Only the "rank something without an account" flow should set this. An
+   * unowned list never comes back from `getUserLists` (which filters on
+   * creator_id) and, under the current RLS policy, is updatable by anyone —
+   * so it has to be a deliberate choice at the call site, never a silent
+   * fallback when the session turns out to be missing.
+   */
+  allowAnonymous?: boolean;
 }): Promise<List> {
-  const { data: { user } } = await supabase.auth.getUser();
+  const userId = await getAuthenticatedUserId();
 
-  let lastError: any = null;
+  if (!userId && !data.allowAnonymous) {
+    throw new NotAuthenticatedError(
+      'You must be signed in to create a list. Please sign in and try again.'
+    );
+  }
+
+  let lastError: PostgrestError | null = null;
   for (let attempt = 0; attempt < SHARE_CODE_MAX_ATTEMPTS; attempt++) {
     const { data: list, error } = await supabase
       .from('lists')
@@ -102,7 +163,9 @@ export async function createList(data: {
         title: data.title,
         description: data.description,
         comparison_prompt: data.comparison_prompt,
-        creator_id: user?.id,
+        // Explicitly null rather than undefined, so an unowned list is a stated
+        // intent in the payload instead of an omitted column.
+        creator_id: userId,
         is_private: data.is_private || false,
         share_code: generateShareCode(),
       })
@@ -111,7 +174,7 @@ export async function createList(data: {
 
     if (!error) return list;
     lastError = error;
-    if (error.code !== PG_UNIQUE_VIOLATION) throw error;
+    if (!isShareCodeCollision(error)) throw error;
   }
   throw lastError;
 }
@@ -151,43 +214,55 @@ export async function getUserLists(userId: string): Promise<List[]> {
 
 export async function getUserListsWithStatus(userId: string): Promise<ListWithStatus[]> {
   const lists = await getUserLists(userId);
-  const listsWithStatus: ListWithStatus[] = [];
+  if (lists.length === 0) return [];
 
-  for (const list of lists) {
-    const items = await getListItems(list.id);
-    const itemCount = items.length;
-    
-    // Get user's ranking for this list
-    const { data: ranking } = await supabase
+  const listIds = lists.map((l) => l.id);
+
+  // Batch-fetch items and rankings for all lists in two queries, regardless of N.
+  // Total round-trips: 1 lists + 1 items + 1 rankings.
+  const [itemsRes, rankingsRes] = await Promise.all([
+    supabase.from('list_items').select('list_id').in('list_id', listIds),
+    supabase
       .from('rankings')
-      .select('*')
-      .eq('list_id', list.id)
-      .eq('user_id', userId)
-      .single();
+      .select('list_id, comparisons_count, is_complete')
+      .in('list_id', listIds)
+      .eq('user_id', userId),
+  ]);
 
+  const itemCounts = new Map<string, number>();
+  for (const row of itemsRes.data || []) {
+    const id = (row as any).list_id;
+    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
+  }
+
+  const rankingsByList = new Map<string, { comparisons_count: number; is_complete: boolean }>();
+  for (const row of rankingsRes.data || []) {
+    const id = (row as any).list_id;
+    rankingsByList.set(id, {
+      comparisons_count: (row as any).comparisons_count,
+      is_complete: (row as any).is_complete,
+    });
+  }
+
+  return lists.map((list) => {
+    const itemCount = itemCounts.get(list.id) || 0;
+    const ranking = rankingsByList.get(list.id);
     let status: 'not_started' | 'in_progress' | 'completed' = 'not_started';
     let comparisonsCount = 0;
-    const estimatedComparisons = itemCount * 2;
 
     if (ranking) {
       comparisonsCount = ranking.comparisons_count;
-      if (ranking.is_complete) {
-        status = 'completed';
-      } else {
-        status = 'in_progress';
-      }
+      status = ranking.is_complete ? 'completed' : 'in_progress';
     }
 
-    listsWithStatus.push({
+    return {
       ...list,
       itemCount,
       rankingStatus: status,
       comparisonsCount,
-      estimatedComparisons,
-    });
-  }
-
-  return listsWithStatus;
+      estimatedComparisons: itemCount * 2,
+    };
+  });
 }
 
 export async function getTemplateLists(): Promise<List[]> {
@@ -234,8 +309,10 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     return [];
   }
 
-  // Transform the data
+  // Transform the data, tracking each list's creator so names can be
+  // resolved in a single batched query afterwards (avoids a per-list round-trip).
   const featured: FeaturedList[] = [];
+  const creatorIdByListId = new Map<string, string>();
   for (const item of data || []) {
     const list = item.lists as any;
     if (!list) continue;
@@ -252,6 +329,10 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
 
+    if (list.creator_id) {
+      creatorIdByListId.set(list.id, list.creator_id);
+    }
+
     featured.push({
       id: item.id,
       list_id: list.id,
@@ -261,6 +342,33 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       item_count: itemCount || 0,
       ranking_count: rankingCount || 0,
     });
+  }
+
+  // Resolve creator display names in a single batched query, then map onto
+  // each featured list. Unresolved creators simply leave creator_name undefined.
+  const creatorIds = Array.from(new Set(creatorIdByListId.values()));
+  if (creatorIds.length > 0) {
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, name')
+      .in('id', creatorIds);
+
+    if (profilesError) {
+      console.log('Creator names not available:', profilesError.message);
+    } else {
+      const nameById = new Map<string, string>();
+      for (const profile of profiles || []) {
+        if (profile?.id && profile.name) {
+          nameById.set(profile.id, profile.name);
+        }
+      }
+      for (const entry of featured) {
+        const creatorId = creatorIdByListId.get(entry.list_id);
+        if (creatorId) {
+          entry.creator_name = nameById.get(creatorId);
+        }
+      }
+    }
   }
 
   return featured;
@@ -273,6 +381,16 @@ export async function deleteList(id: string): Promise<void> {
     .eq('id', id);
 
   if (error) throw error;
+
+  // The list id is the only handle on its local partial ranking; once the row
+  // is gone nothing can ever discover that key again, so clear it here.
+  // Best-effort: the remote delete already succeeded, and failing the call
+  // would tell the caller the list still exists.
+  try {
+    await clearPartialRanking(id);
+  } catch (localError) {
+    console.error('Failed to clear partial ranking for deleted list:', localError);
+  }
 }
 
 // ============================================
@@ -316,12 +434,30 @@ export async function addListItem(listId: string, name: string): Promise<ListIte
 }
 
 export async function addListItems(listId: string, names: string[]): Promise<ListItem[]> {
-  const items: ListItem[] = [];
-  for (let i = 0; i < names.length; i++) {
-    const item = await addListItem(listId, names[i]);
-    items.push(item);
-  }
-  return items;
+  if (names.length === 0) return [];
+
+  const { data: existing } = await supabase
+    .from('list_items')
+    .select('display_order')
+    .eq('list_id', listId)
+    .order('display_order', { ascending: false })
+    .limit(1);
+
+  const maxOrder = existing?.[0]?.display_order ?? -1;
+
+  const rows = names.map((name, i) => ({
+    list_id: listId,
+    name,
+    display_order: maxOrder + 1 + i,
+  }));
+
+  const { data, error } = await supabase
+    .from('list_items')
+    .insert(rows)
+    .select();
+
+  if (error) throw error;
+  return data || [];
 }
 
 export async function deleteListItem(id: string): Promise<void> {
@@ -366,13 +502,15 @@ export async function createRanking(listId: string, userId?: string): Promise<Ra
 
   // Initialize ranked items
   const items = await getListItems(listId);
-  for (const item of items) {
-    await supabase.from('ranked_items').insert({
+  if (items.length > 0) {
+    const rows = items.map((item) => ({
       ranking_id: ranking.id,
       item_id: item.id,
       rating: 1500,
       comparisons: 0,
-    });
+    }));
+    const { error: insertError } = await supabase.from('ranked_items').insert(rows);
+    if (insertError) throw insertError;
   }
 
   return ranking;
@@ -440,21 +578,13 @@ export async function updateRankedItem(
 }
 
 export async function incrementComparisonsCount(rankingId: string): Promise<void> {
-  const { data: ranking } = await supabase
-    .from('rankings')
-    .select('comparisons_count')
-    .eq('id', rankingId)
-    .single();
+  // Atomic increment via RPC — see supabase/migrations/20260523000000_increment_comparisons_count.sql.
+  // A read-then-update would race when concurrent comparisons land on the same ranking.
+  const { error } = await supabase.rpc('increment_comparisons_count', {
+    p_ranking_id: rankingId,
+  });
 
-  if (ranking) {
-    await supabase
-      .from('rankings')
-      .update({ 
-        comparisons_count: ranking.comparisons_count + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', rankingId);
-  }
+  if (error) throw error;
 }
 
 export async function markRankingComplete(rankingId: string): Promise<void> {

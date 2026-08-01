@@ -40,3 +40,8 @@ yarn-error.*
 /ios
 /android
 coverage/
+
+# EAS submit credentials (never commit)
+play-store-service-account.json
+google-services.json
+GoogleService-Info.plist
