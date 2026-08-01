@@ -65,11 +65,20 @@ export default function AddItemModal({ visible, onClose, onAdd, existingItems }:
         
         <View style={styles.sheet}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={handleClose}>
+            <TouchableOpacity
+              onPress={handleClose}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel"
+            >
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
             <Text style={styles.title}>Add Item</Text>
-            <TouchableOpacity onPress={handleAdd}>
+            <TouchableOpacity
+              onPress={handleAdd}
+              accessibilityRole="button"
+              accessibilityLabel="Add item"
+              accessibilityState={{ disabled: !name.trim() }}
+            >
               <Text style={[styles.addText, !name.trim() && styles.addTextDisabled]}>
                 Add
               </Text>
