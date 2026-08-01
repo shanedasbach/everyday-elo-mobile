@@ -1,3 +1,10 @@
+// Must stay the FIRST import: module bodies evaluate in import order, so this
+// is what puts Sentry.init ahead of every other module's top-level code —
+// including lib/supabase.ts, which throws at module init when its env vars are
+// missing. Moving it down makes that class of crash invisible. Enforced by
+// lib/__tests__/bootstrap.test.ts.
+import '../lib/bootstrap';
+
 import { useEffect } from 'react';
 import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';

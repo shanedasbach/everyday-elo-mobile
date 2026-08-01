@@ -25,6 +25,8 @@ module.exports = {
     'lib/swipe-gesture.ts',
     'lib/notifications.ts',
     'lib/supabase-config.ts',
+    'lib/monitoring.ts',
+    'lib/bootstrap.ts',
   ],
   coverageThreshold: {
     global: {
