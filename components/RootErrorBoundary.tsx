@@ -8,9 +8,6 @@ interface RootErrorBoundaryProps {
 interface RootErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
-  // Bumped on retry to force-remount the child subtree (a render-time throw
-  // re-occurs immediately unless the children actually re-mount).
-  retryKey: number;
 }
 
 /**
@@ -22,7 +19,7 @@ export class RootErrorBoundary extends React.Component<
   RootErrorBoundaryProps,
   RootErrorBoundaryState
 > {
-  state: RootErrorBoundaryState = { hasError: false, error: null, retryKey: 0 };
+  state: RootErrorBoundaryState = { hasError: false, error: null };
 
   static getDerivedStateFromError(error: Error): Partial<RootErrorBoundaryState> {
     return { hasError: true, error };
@@ -34,11 +31,7 @@ export class RootErrorBoundary extends React.Component<
   }
 
   handleRetry = () => {
-    this.setState((prev) => ({
-      hasError: false,
-      error: null,
-      retryKey: prev.retryKey + 1,
-    }));
+    this.setState({ hasError: false, error: null });
   };
 
   render() {
@@ -60,8 +53,13 @@ export class RootErrorBoundary extends React.Component<
       );
     }
 
-    // Keying the subtree means a successful retry fully re-mounts children.
-    return <React.Fragment key={this.state.retryKey}>{this.props.children}</React.Fragment>;
+    // No key needed: React has already unmounted the subtree that threw, so
+    // clearing hasError mounts a fresh one. (An earlier draft carried a
+    // `retryKey` counter here; a mutation test showed it never changed the
+    // outcome, so it was removed rather than left documenting a mechanism it
+    // wasn't providing. `RootErrorBoundary.test.tsx` asserts the re-mount with
+    // mount/unmount counters.)
+    return <React.Fragment>{this.props.children}</React.Fragment>;
   }
 }
 
