@@ -95,6 +95,18 @@ describe('initMonitoring', () => {
     expect(Sentry.init).not.toHaveBeenCalled();
   });
 
+  it('prefers `development` over `no-dsn` in dev with no DSN — dev suppresses either way', () => {
+    const mod = loadMonitoring(true);
+    expect(mod.initMonitoring()).toBe('development');
+    expect(Sentry.init).not.toHaveBeenCalled();
+  });
+
+  it('does not set `debug` — it would be provably false, since dev returns early', () => {
+    process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
+    loadMonitoring(false).initMonitoring();
+    expect((Sentry.init as jest.Mock).mock.calls[0][0]).not.toHaveProperty('debug');
+  });
+
   it('is idempotent — a second call reports `already-initialized` and does not re-init', () => {
     process.env.EXPO_PUBLIC_SENTRY_DSN = 'https://env@sentry.io/1';
     const mod = loadMonitoring(false);

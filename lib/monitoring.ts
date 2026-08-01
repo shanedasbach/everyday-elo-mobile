@@ -43,12 +43,13 @@ export function getSentryDsn(): string | undefined {
  */
 export function initMonitoring(): MonitoringStatus {
   if (initialized) return 'already-initialized';
+  // Dev is checked before the DSN: dev suppresses monitoring whether or not a
+  // DSN is set, so `development` is the accurate reason in that case.
+  if (isDev) return 'development';
   const dsn = getSentryDsn();
   if (!dsn) return 'no-dsn';
-  if (isDev) return 'development';
   Sentry.init({
     dsn,
-    debug: isDev,
     enableAutoSessionTracking: true,
     // The SDK attaches the reporter's IP address by default. State the posture
     // explicitly rather than inheriting it.

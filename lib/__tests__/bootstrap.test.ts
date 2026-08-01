@@ -50,8 +50,13 @@ describe('lib/bootstrap', () => {
     expect(mod.monitoringStatus).toBe('no-dsn');
   });
 
-  it('is wired into app/_layout.tsx, so the shipped app actually runs it', () => {
+  it('is the first import in app/_layout.tsx, so it runs before any other module body', () => {
+    // Not style: imports evaluate in source order, so anything above this line
+    // gets its module body run before Sentry.init. lib/supabase.ts throws at
+    // module init on missing env, which is exactly the crash issue #47 names.
+    // A reorder by import/order or an auto-formatter would silently undo it.
     const layout = readFileSync(join(__dirname, '..', '..', 'app', '_layout.tsx'), 'utf8');
-    expect(layout).toMatch(/import\s+['"]\.\.\/lib\/bootstrap['"]/);
+    const imports = [...layout.matchAll(/^import\s.*$/gm)].map((m) => m[0]);
+    expect(imports[0]).toMatch(/['"]\.\.\/lib\/bootstrap['"]/);
   });
 });

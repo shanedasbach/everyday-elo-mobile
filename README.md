@@ -152,7 +152,17 @@ imported by `app/_layout.tsx`) whenever `EXPO_PUBLIC_SENTRY_DSN` is set and the
 build is not a dev build. That is all the runtime needs — set the DSN and
 crashes are reported.
 
-**Source-map upload is not enabled.** The `@sentry/react-native/expo` config
+The bootstrap import must stay the **first** import in `app/_layout.tsx`.
+Module bodies evaluate in import order, so anything imported above it runs
+before `Sentry.init` — including `lib/supabase.ts`, which throws at module init
+when its env vars are missing. `lib/__tests__/bootstrap.test.ts` asserts the
+ordering against the source so a reorder fails CI.
+
+As an alternative to the env var, the DSN may be set as `expo.extra.sentryDsn`
+in `app.json`; `EXPO_PUBLIC_SENTRY_DSN` wins when both are present.
+
+**Source-map upload is not enabled** — tracked in
+[#75](https://github.com/shanedasbach/everyday-elo-mobile/issues/75). The `@sentry/react-native/expo` config
 plugin is deliberately absent from `app.json`: it runs `sentry-cli` on every
 `expo prebuild` / `eas build` and fails the build unless a real Sentry
 organization, project, and auth token exist. None do yet. Stack traces are

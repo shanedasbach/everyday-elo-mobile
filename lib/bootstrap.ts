@@ -6,7 +6,10 @@
  * the app shipping without crash reporting. Keeping the call here means
  * `lib/__tests__/bootstrap.test.ts` can assert it actually runs on import.
  *
- * Import for side effects only: `import '../lib/bootstrap';`
+ * Import for side effects only: `import '../lib/bootstrap';` — and import it
+ * FIRST, since module bodies evaluate in import order and several of the app's
+ * modules (lib/supabase.ts via lib/auth-context, lib/notifications.ts) can
+ * throw during their own module init.
  */
 import { initMonitoring } from './monitoring';
 
