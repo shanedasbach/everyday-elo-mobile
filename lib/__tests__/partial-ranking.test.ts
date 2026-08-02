@@ -2,12 +2,23 @@
  * Tests for partial ranking persistence (save & exit flow for offline/template rankings).
  */
 
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  __esModule: true,
+  default: {
+    setItem: jest.fn(),
+    getItem: jest.fn(),
+    removeItem: jest.fn(),
+    getAllKeys: jest.fn(),
+  },
+}));
+
 jest.mock('expo-secure-store', () => ({
   setItemAsync: jest.fn(),
   getItemAsync: jest.fn(),
   deleteItemAsync: jest.fn(),
 }));
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import {
   savePartialRanking,
@@ -21,7 +32,8 @@ import {
   PartialRankedItem,
 } from '../partial-ranking';
 
-const mockStore = SecureStore as jest.Mocked<typeof SecureStore>;
+const mockAsync = AsyncStorage as jest.Mocked<typeof AsyncStorage>;
+const mockSecure = SecureStore as jest.Mocked<typeof SecureStore>;
 
 const sampleItems: PartialRankedItem[] = [
   { itemId: 'a', name: 'Alpha', rating: 1520, comparisons: 2 },
@@ -31,54 +43,74 @@ const sampleItems: PartialRankedItem[] = [
 /** Fixed clock so TTL boundaries are exact rather than wall-clock dependent. */
 const NOW = Date.parse('2026-07-01T00:00:00.000Z');
 const FRESH = new Date(NOW - 1000).toISOString();
-const INDEX_KEY = 'partial_ranking_index';
+const STALE = new Date(NOW - PARTIAL_RANKING_TTL_MS - 1).toISOString();
+
+const LEGACY_INDEX_KEY = 'partial_ranking_index';
+const LEGACY_MIGRATED_KEY = 'partial_rankings:legacy_migrated';
 
 /**
- * In-memory stand-in for SecureStore. Index consistency is a property of what
- * ends up stored, so the tests assert against real contents rather than call
- * sequences.
+ * In-memory stands-in for both backends. Storage consistency is a property of
+ * what ends up stored, so the tests assert against real contents rather than
+ * call sequences.
  */
-let store: Map<string, string>;
+let asyncStore: Map<string, string>;
+let secureStore: Map<string, string>;
 
-function seed(
-  listId: string,
-  overrides: Partial<{ comparisons: number; items: unknown; updatedAt: string }> = {}
-): void {
-  store.set(
-    `partial_ranking_${listId}`,
-    JSON.stringify({
-      version: 1,
-      listId,
-      comparisons: overrides.comparisons ?? 2,
-      items: overrides.items ?? sampleItems,
-      updatedAt: overrides.updatedAt ?? FRESH,
-    })
-  );
+type Overrides = Partial<{
+  comparisons: number;
+  items: unknown;
+  updatedAt: string;
+}>;
+
+function payload(listId: string, overrides: Overrides = {}): string {
+  return JSON.stringify({
+    version: 1,
+    listId,
+    comparisons: overrides.comparisons ?? 2,
+    items: overrides.items ?? sampleItems,
+    updatedAt: overrides.updatedAt ?? FRESH,
+  });
 }
 
-function storedIndex(): string[] | undefined {
-  const raw = store.get(INDEX_KEY);
-  return raw === undefined ? undefined : JSON.parse(raw);
+/** A record written by the current build. */
+function seed(listId: string, overrides: Overrides = {}): void {
+  asyncStore.set(`partial_ranking_${listId}`, payload(listId, overrides));
+}
+
+/** A record written by a SecureStore-era build. */
+function seedLegacy(listId: string, overrides: Overrides = {}): void {
+  secureStore.set(`partial_ranking_${listId}`, payload(listId, overrides));
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
-  store = new Map();
-  mockStore.setItemAsync.mockImplementation(async (key: string, value: string) => {
-    store.set(key, value);
+  asyncStore = new Map();
+  secureStore = new Map();
+
+  mockAsync.setItem.mockImplementation(async (key: string, value: string) => {
+    asyncStore.set(key, value);
   });
-  mockStore.getItemAsync.mockImplementation(async (key: string) => store.get(key) ?? null);
-  mockStore.deleteItemAsync.mockImplementation(async (key: string) => {
-    store.delete(key);
+  mockAsync.getItem.mockImplementation(async (key: string) => asyncStore.get(key) ?? null);
+  mockAsync.removeItem.mockImplementation(async (key: string) => {
+    asyncStore.delete(key);
+  });
+  mockAsync.getAllKeys.mockImplementation(async () => Array.from(asyncStore.keys()));
+
+  mockSecure.setItemAsync.mockImplementation(async (key: string, value: string) => {
+    secureStore.set(key, value);
+  });
+  mockSecure.getItemAsync.mockImplementation(async (key: string) => secureStore.get(key) ?? null);
+  mockSecure.deleteItemAsync.mockImplementation(async (key: string) => {
+    secureStore.delete(key);
   });
 });
 
 describe('partial-ranking', () => {
   describe('savePartialRanking', () => {
-    it('writes a versioned payload under a namespaced key', async () => {
+    it('writes a versioned payload to AsyncStorage under a namespaced key', async () => {
       await savePartialRanking('movies', sampleItems, 4);
 
-      const value = store.get('partial_ranking_movies');
+      const value = asyncStore.get('partial_ranking_movies');
       expect(value).toBeDefined();
       const parsed = JSON.parse(value!);
       expect(parsed.version).toBe(1);
@@ -89,36 +121,38 @@ describe('partial-ranking', () => {
       expect(Number.isNaN(Date.parse(parsed.updatedAt))).toBe(false);
     });
 
-    it('records the list in the index', async () => {
+    it('never writes to SecureStore', async () => {
       await savePartialRanking('movies', sampleItems, 4);
-      expect(storedIndex()).toEqual(['movies']);
+      expect(mockSecure.setItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('makes the list immediately enumerable without a separate index write', async () => {
+      await savePartialRanking('movies', sampleItems, 4);
       expect(await listPartialRankingIds()).toEqual(['movies']);
+      expect(mockAsync.setItem).toHaveBeenCalledTimes(1);
     });
 
-    it('does not duplicate an index entry when the same list is saved again', async () => {
-      await savePartialRanking('movies', sampleItems, 4);
-      await savePartialRanking('movies', sampleItems, 5);
-      await savePartialRanking('pizza', sampleItems, 1);
-
-      expect(storedIndex()).toEqual(['movies', 'pizza']);
+    it('propagates a failed write so the caller can report it', async () => {
+      mockAsync.setItem.mockRejectedValueOnce(new Error('quota'));
+      await expect(savePartialRanking('movies', sampleItems, 4)).rejects.toThrow('quota');
     });
 
-    it('ignores a corrupt index rather than throwing', async () => {
-      store.set(INDEX_KEY, 'not-json');
-      await savePartialRanking('movies', sampleItems, 4);
-      expect(storedIndex()).toEqual(['movies']);
-    });
+    it('stores a payload far larger than SecureStore accepts', async () => {
+      // The regression this module's storage choice exists to fix: SecureStore
+      // silently fails past ~2KB on Android.
+      const many: PartialRankedItem[] = Array.from({ length: 200 }, (_, i) => ({
+        itemId: `item-${i}`,
+        name: `A reasonably long item name number ${i}`,
+        rating: 1500 + i,
+        comparisons: i,
+      }));
 
-    it('drops non-string entries when reading the index', async () => {
-      store.set(INDEX_KEY, JSON.stringify(['movies', 42, null]));
-      await savePartialRanking('pizza', sampleItems, 1);
-      expect(storedIndex()).toEqual(['movies', 'pizza']);
-    });
+      await savePartialRanking('big', many, 500);
 
-    it('ignores an index that is not an array', async () => {
-      store.set(INDEX_KEY, JSON.stringify({ movies: true }));
-      await savePartialRanking('movies', sampleItems, 4);
-      expect(storedIndex()).toEqual(['movies']);
+      const value = asyncStore.get('partial_ranking_big')!;
+      expect(value.length).toBeGreaterThan(2048);
+      const result = await getPartialRanking('big', NOW);
+      expect(result?.items).toEqual(many);
     });
   });
 
@@ -137,12 +171,12 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when the payload is not valid JSON', async () => {
-      store.set('partial_ranking_movies', 'not-json');
+      asyncStore.set('partial_ranking_movies', 'not-json');
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when the stored version is not supported', async () => {
-      store.set(
+      asyncStore.set(
         'partial_ranking_movies',
         JSON.stringify({ version: 99, listId: 'movies', comparisons: 1, items: [] })
       );
@@ -150,7 +184,7 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when the stored listId does not match', async () => {
-      store.set(
+      asyncStore.set(
         'partial_ranking_movies',
         JSON.stringify({ version: 1, listId: 'pizza', comparisons: 1, items: [] })
       );
@@ -163,12 +197,12 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when the root payload is not an object', async () => {
-      store.set('partial_ranking_movies', '"just a string"');
+      asyncStore.set('partial_ranking_movies', '"just a string"');
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
     it('returns null when the root payload is JSON null', async () => {
-      store.set('partial_ranking_movies', 'null');
+      asyncStore.set('partial_ranking_movies', 'null');
       expect(await getPartialRanking('movies')).toBeNull();
     });
 
@@ -186,7 +220,7 @@ describe('partial-ranking', () => {
       // JSON can't express NaN/Infinity literals, but very large exponents
       // (1e999) parse as Infinity — use that to hit the finite guard without
       // bypassing JSON.parse.
-      store.set(
+      asyncStore.set(
         'partial_ranking_movies',
         `{"version":1,"listId":"movies","comparisons":1e999,"items":[],"updatedAt":"${FRESH}"}`
       );
@@ -194,7 +228,7 @@ describe('partial-ranking', () => {
     });
 
     it('returns null when updatedAt is missing', async () => {
-      store.set(
+      asyncStore.set(
         'partial_ranking_movies',
         JSON.stringify({
           version: 1,
@@ -227,7 +261,7 @@ describe('partial-ranking', () => {
 
     it('returns null when an item has a non-finite rating', async () => {
       // 1e999 parses to Infinity via valid JSON, exercising the finite guard.
-      store.set(
+      asyncStore.set(
         'partial_ranking_movies',
         `{"version":1,"listId":"movies","comparisons":2,"items":[{"itemId":"a","name":"Alpha","rating":1e999,"comparisons":2}],"updatedAt":"${FRESH}"}`
       );
@@ -240,9 +274,7 @@ describe('partial-ranking', () => {
     });
 
     it('treats a record older than the TTL as absent', async () => {
-      seed('movies', {
-        updatedAt: new Date(NOW - PARTIAL_RANKING_TTL_MS - 1).toISOString(),
-      });
+      seed('movies', { updatedAt: STALE });
       expect(await getPartialRanking('movies', NOW)).toBeNull();
     });
 
@@ -257,38 +289,122 @@ describe('partial-ranking', () => {
       seed('movies', { updatedAt: 'sometime last year' });
       expect(await getPartialRanking('movies', NOW)).toBeNull();
     });
+
+    it('returns null rather than rejecting when the read fails', async () => {
+      // A transient storage error must not reject into the screen's load path.
+      mockAsync.getItem.mockRejectedValue(new Error('storage unavailable'));
+      expect(await getPartialRanking('movies', NOW)).toBeNull();
+    });
+  });
+
+  describe('legacy SecureStore migration', () => {
+    it('reads through to a legacy entry and carries it forward', async () => {
+      seedLegacy('movies', { comparisons: 3 });
+
+      const result = await getPartialRanking('movies', NOW);
+
+      expect(result?.comparisons).toBe(3);
+      expect(asyncStore.get('partial_ranking_movies')).toBeDefined();
+      expect(secureStore.has('partial_ranking_movies')).toBe(false);
+    });
+
+    it('keeps the legacy copy when the forward write fails', async () => {
+      // Blocking regression: deleting unconditionally destroyed the only
+      // durable copy whenever AsyncStorage rejected.
+      seedLegacy('movies', { comparisons: 3 });
+      mockAsync.setItem.mockRejectedValue(new Error('quota'));
+
+      const result = await getPartialRanking('movies', NOW);
+
+      expect(result?.comparisons).toBe(3);
+      expect(secureStore.has('partial_ranking_movies')).toBe(true);
+      expect(mockSecure.deleteItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('prefers the AsyncStorage record and never touches the keychain', async () => {
+      seed('movies', { comparisons: 7 });
+      seedLegacy('movies', { comparisons: 1 });
+
+      expect((await getPartialRanking('movies', NOW))?.comparisons).toBe(7);
+      expect(mockSecure.getItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('reclaims a legacy entry that cannot be parsed', async () => {
+      secureStore.set('partial_ranking_movies', 'not-json');
+
+      expect(await getPartialRanking('movies', NOW)).toBeNull();
+      expect(secureStore.has('partial_ranking_movies')).toBe(false);
+    });
+
+    it('survives a keychain read error', async () => {
+      mockSecure.getItemAsync.mockRejectedValue(new Error('keychain locked'));
+      expect(await getPartialRanking('movies', NOW)).toBeNull();
+    });
+
+    it('tolerates a keychain delete error after a successful forward write', async () => {
+      seedLegacy('movies');
+      mockSecure.deleteItemAsync.mockRejectedValue(new Error('keychain locked'));
+
+      expect(await getPartialRanking('movies', NOW)).not.toBeNull();
+      expect(asyncStore.has('partial_ranking_movies')).toBe(true);
+    });
+
+    it('skips the keychain entirely once the sweep has completed', async () => {
+      asyncStore.set(LEGACY_MIGRATED_KEY, '1');
+
+      expect(await getPartialRanking('movies', NOW)).toBeNull();
+      expect(mockSecure.getItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('still falls back when the migration flag cannot be read', async () => {
+      seedLegacy('movies');
+      mockAsync.getItem.mockRejectedValue(new Error('storage unavailable'));
+
+      expect(await getPartialRanking('movies', NOW)).not.toBeNull();
+    });
   });
 
   describe('clearPartialRanking', () => {
     it('deletes the stored entry for the given list', async () => {
       seed('movies');
       await clearPartialRanking('movies');
-      expect(mockStore.deleteItemAsync).toHaveBeenCalledWith('partial_ranking_movies');
-      expect(store.has('partial_ranking_movies')).toBe(false);
+      expect(mockAsync.removeItem).toHaveBeenCalledWith('partial_ranking_movies');
+      expect(asyncStore.has('partial_ranking_movies')).toBe(false);
     });
 
-    it('removes the list from the index', async () => {
+    it('drops a lingering legacy entry so a cleared ranking cannot resurrect', async () => {
+      seed('movies');
+      seedLegacy('movies');
+
+      await clearPartialRanking('movies');
+
+      expect(secureStore.has('partial_ranking_movies')).toBe(false);
+      expect(await getPartialRanking('movies', NOW)).toBeNull();
+    });
+
+    it('stops the list being enumerated', async () => {
       await savePartialRanking('movies', sampleItems, 2);
       await savePartialRanking('pizza', sampleItems, 1);
 
       await clearPartialRanking('movies');
 
-      expect(storedIndex()).toEqual(['pizza']);
+      expect(await listPartialRankingIds()).toEqual(['pizza']);
     });
 
-    it('drops the index key entirely once the last entry is cleared', async () => {
-      await savePartialRanking('movies', sampleItems, 2);
-      await clearPartialRanking('movies');
-
-      expect(store.has(INDEX_KEY)).toBe(false);
-      expect(await listPartialRankingIds()).toEqual([]);
-    });
-
-    it('leaves the index untouched for a list it does not track', async () => {
+    it('leaves other lists untouched', async () => {
       await savePartialRanking('movies', sampleItems, 2);
       await clearPartialRanking('pizza');
 
-      expect(storedIndex()).toEqual(['movies']);
+      expect(await listPartialRankingIds()).toEqual(['movies']);
+    });
+
+    it('still clears AsyncStorage when the keychain delete fails', async () => {
+      seed('movies');
+      mockSecure.deleteItemAsync.mockRejectedValue(new Error('keychain locked'));
+
+      await clearPartialRanking('movies');
+
+      expect(asyncStore.has('partial_ranking_movies')).toBe(false);
     });
   });
 
@@ -308,10 +424,7 @@ describe('partial-ranking', () => {
     });
 
     it('is false for an expired ranking, so no stale resume is offered', async () => {
-      seed('movies', {
-        comparisons: 5,
-        updatedAt: new Date(NOW - PARTIAL_RANKING_TTL_MS - 1).toISOString(),
-      });
+      seed('movies', { comparisons: 5, updatedAt: STALE });
       expect(await hasPartialRanking('movies', NOW)).toBe(false);
     });
   });
@@ -320,62 +433,85 @@ describe('partial-ranking', () => {
     it('is empty when nothing has been written', async () => {
       expect(await listPartialRankingIds()).toEqual([]);
     });
+
+    it('ignores keys outside the record namespace', async () => {
+      await savePartialRanking('movies', sampleItems, 2);
+      asyncStore.set('supabase_session', 'unrelated');
+      asyncStore.set(LEGACY_MIGRATED_KEY, '1');
+      asyncStore.set('partial_ranking_', 'empty list id');
+
+      expect(await listPartialRankingIds()).toEqual(['movies']);
+    });
+
+    it('is empty when the key scan fails', async () => {
+      mockAsync.getAllKeys.mockRejectedValue(new Error('storage unavailable'));
+      expect(await listPartialRankingIds()).toEqual([]);
+    });
   });
 
   describe('prunePartialRankings', () => {
     it('reclaims expired records and leaves fresh ones alone', async () => {
       await savePartialRanking('movies', sampleItems, 2);
-      await savePartialRanking('pizza', sampleItems, 3);
-      seed('pizza', {
-        updatedAt: new Date(NOW - PARTIAL_RANKING_TTL_MS - 1).toISOString(),
-      });
+      seed('pizza', { updatedAt: STALE });
 
       const pruned = await prunePartialRankings(NOW);
 
       expect(pruned).toEqual(['pizza']);
-      expect(store.has('partial_ranking_pizza')).toBe(false);
-      expect(store.has('partial_ranking_movies')).toBe(true);
-      expect(storedIndex()).toEqual(['movies']);
+      expect(asyncStore.has('partial_ranking_pizza')).toBe(false);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(true);
+      expect(await listPartialRankingIds()).toEqual(['movies']);
     });
 
     it('reclaims a record whose payload no longer parses', async () => {
       await savePartialRanking('movies', sampleItems, 2);
-      store.set('partial_ranking_movies', 'not-json');
+      asyncStore.set('partial_ranking_movies', 'not-json');
 
       expect(await prunePartialRankings(NOW)).toEqual(['movies']);
-      expect(store.has('partial_ranking_movies')).toBe(false);
-      expect(store.has(INDEX_KEY)).toBe(false);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(false);
     });
 
-    it('drops an index entry whose payload has already vanished', async () => {
+    it('reclaims a record that was never reachable through the old index', async () => {
+      // The drift the removed index made possible: a payload present but
+      // unindexed was permanently unprunable. A key scan cannot miss it.
+      seed('written-by-an-older-build', { updatedAt: STALE });
+
+      expect(await prunePartialRankings(NOW)).toEqual(['written-by-an-older-build']);
+    });
+
+    it('writes nothing when every record is still fresh', async () => {
       await savePartialRanking('movies', sampleItems, 2);
-      store.delete('partial_ranking_movies');
+      mockAsync.setItem.mockClear();
+      mockAsync.removeItem.mockClear();
+
+      expect(await prunePartialRankings(NOW)).toEqual([]);
+      expect(mockAsync.setItem).not.toHaveBeenCalled();
+      expect(mockAsync.removeItem).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op on empty storage', async () => {
+      expect(await prunePartialRankings(NOW)).toEqual([]);
+      expect(mockAsync.removeItem).not.toHaveBeenCalled();
+    });
+
+    it('tolerates a failed delete', async () => {
+      seed('movies', { updatedAt: STALE });
+      mockAsync.removeItem.mockRejectedValue(new Error('storage unavailable'));
 
       expect(await prunePartialRankings(NOW)).toEqual(['movies']);
-      expect(await listPartialRankingIds()).toEqual([]);
-    });
-
-    it('rewrites nothing when every indexed record is still fresh', async () => {
-      await savePartialRanking('movies', sampleItems, 2);
-      mockStore.setItemAsync.mockClear();
-
-      expect(await prunePartialRankings(NOW)).toEqual([]);
-      expect(mockStore.setItemAsync).not.toHaveBeenCalled();
-      expect(storedIndex()).toEqual(['movies']);
-    });
-
-    it('is a no-op on an empty index', async () => {
-      expect(await prunePartialRankings(NOW)).toEqual([]);
-      expect(mockStore.deleteItemAsync).not.toHaveBeenCalled();
     });
 
     it('falls back to the current clock when no timestamp is given', async () => {
-      await savePartialRanking('movies', sampleItems, 2);
       seed('movies', {
         updatedAt: new Date(Date.now() - PARTIAL_RANKING_TTL_MS - 1000).toISOString(),
       });
 
       expect(await prunePartialRankings()).toEqual(['movies']);
+    });
+
+    it('does not read through to the keychain', async () => {
+      seed('movies', { updatedAt: STALE });
+      await prunePartialRankings(NOW);
+      expect(mockSecure.getItemAsync).not.toHaveBeenCalled();
     });
   });
 
@@ -387,32 +523,43 @@ describe('partial-ranking', () => {
       const result = await reconcilePartialRankings(['movies'], NOW);
 
       expect(result.orphaned).toEqual(['deleted-list']);
-      expect(store.has('partial_ranking_deleted-list')).toBe(false);
-      expect(store.has('partial_ranking_movies')).toBe(true);
-      expect(storedIndex()).toEqual(['movies']);
+      expect(asyncStore.has('partial_ranking_deleted-list')).toBe(false);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(true);
+      expect(await listPartialRankingIds()).toEqual(['movies']);
     });
 
-    it('adopts a pre-index record so it becomes prunable', async () => {
-      // Written by an older build: payload present, no index entry.
-      seed('movies');
+    it('adopts a legacy record for a known list', async () => {
+      seedLegacy('movies');
 
       const result = await reconcilePartialRankings(['movies'], NOW);
 
       expect(result.adopted).toEqual(['movies']);
-      expect(storedIndex()).toEqual(['movies']);
-      expect(store.has('partial_ranking_movies')).toBe(true);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(true);
+      expect(secureStore.has('partial_ranking_movies')).toBe(false);
     });
 
-    it('adopts and then immediately prunes a pre-index record that is expired', async () => {
-      seed('movies', {
-        updatedAt: new Date(NOW - PARTIAL_RANKING_TTL_MS - 1).toISOString(),
-      });
+    it('adopts a legacy record listed only in the legacy index', async () => {
+      // A list deleted since the last launch: not in the known set, so the
+      // known set alone would leave its keychain entry stranded forever.
+      seedLegacy('deleted-list');
+      secureStore.set(LEGACY_INDEX_KEY, JSON.stringify(['deleted-list']));
+
+      const result = await reconcilePartialRankings(['movies'], NOW);
+
+      expect(result.adopted).toEqual(['deleted-list']);
+      expect(result.orphaned).toEqual(['deleted-list']);
+      expect(secureStore.has('partial_ranking_deleted-list')).toBe(false);
+      expect(asyncStore.has('partial_ranking_deleted-list')).toBe(false);
+    });
+
+    it('adopts and then immediately prunes an expired legacy record', async () => {
+      seedLegacy('movies', { updatedAt: STALE });
 
       const result = await reconcilePartialRankings(['movies'], NOW);
 
       expect(result.adopted).toEqual(['movies']);
       expect(result.expired).toEqual(['movies']);
-      expect(store.has('partial_ranking_movies')).toBe(false);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(false);
       expect(await listPartialRankingIds()).toEqual([]);
     });
 
@@ -423,13 +570,83 @@ describe('partial-ranking', () => {
       expect(await listPartialRankingIds()).toEqual([]);
     });
 
-    it('keeps template records when template ids are included in the known set', async () => {
+    it('leaves an already-migrated record alone', async () => {
+      await savePartialRanking('movies', sampleItems, 2);
+      seedLegacy('movies', { comparisons: 99 });
+
+      const result = await reconcilePartialRankings(['movies'], NOW);
+
+      expect(result.adopted).toEqual([]);
+      expect((await getPartialRanking('movies', NOW))?.comparisons).toBe(2);
+    });
+
+    it('retires the legacy index and stops sweeping once drained', async () => {
+      seedLegacy('movies');
+      secureStore.set(LEGACY_INDEX_KEY, JSON.stringify(['movies']));
+
+      await reconcilePartialRankings(['movies'], NOW);
+
+      expect(secureStore.has(LEGACY_INDEX_KEY)).toBe(false);
+      expect(asyncStore.get(LEGACY_MIGRATED_KEY)).toBe('1');
+
+      mockSecure.getItemAsync.mockClear();
+      await reconcilePartialRankings(['movies'], NOW);
+      expect(mockSecure.getItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('keeps sweeping when a forward write failed, so nothing is stranded', async () => {
+      seedLegacy('movies');
+      mockAsync.setItem.mockRejectedValue(new Error('quota'));
+
+      const result = await reconcilePartialRankings(['movies'], NOW);
+
+      expect(result.adopted).toEqual(['movies']);
+      expect(secureStore.has('partial_ranking_movies')).toBe(true);
+      expect(asyncStore.has(LEGACY_MIGRATED_KEY)).toBe(false);
+    });
+
+    it('keeps sweeping when the legacy index cannot be read', async () => {
+      mockSecure.getItemAsync.mockRejectedValue(new Error('keychain locked'));
+
+      await reconcilePartialRankings(['movies'], NOW);
+
+      expect(asyncStore.has(LEGACY_MIGRATED_KEY)).toBe(false);
+    });
+
+    it('ignores a corrupt legacy index', async () => {
+      secureStore.set(LEGACY_INDEX_KEY, 'not-json');
+      seedLegacy('movies');
+
+      const result = await reconcilePartialRankings(['movies'], NOW);
+
+      expect(result.adopted).toEqual(['movies']);
+    });
+
+    it('ignores a legacy index that is not an array', async () => {
+      secureStore.set(LEGACY_INDEX_KEY, JSON.stringify({ movies: true }));
+
+      const result = await reconcilePartialRankings([], NOW);
+
+      expect(result.adopted).toEqual([]);
+      expect(asyncStore.get(LEGACY_MIGRATED_KEY)).toBe('1');
+    });
+
+    it('drops non-string entries from the legacy index', async () => {
+      secureStore.set(LEGACY_INDEX_KEY, JSON.stringify(['movies', 42, null]));
+      seedLegacy('movies');
+
+      const result = await reconcilePartialRankings([], NOW);
+
+      expect(result.adopted).toEqual(['movies']);
+    });
+
+    it('keeps template records when template ids are in the known set', async () => {
       await savePartialRanking('movies', sampleItems, 2);
 
       const result = await reconcilePartialRankings(['some-user-list', 'movies'], NOW);
 
       expect(result.orphaned).toEqual([]);
-      expect(store.has('partial_ranking_movies')).toBe(true);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(true);
     });
 
     it('falls back to the current clock when no timestamp is given', async () => {
@@ -438,7 +655,7 @@ describe('partial-ranking', () => {
       const result = await reconcilePartialRankings(['movies']);
 
       expect(result.expired).toEqual([]);
-      expect(store.has('partial_ranking_movies')).toBe(true);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(true);
     });
 
     it('clears everything when the known set is empty', async () => {
@@ -447,8 +664,17 @@ describe('partial-ranking', () => {
       const result = await reconcilePartialRankings([], NOW);
 
       expect(result.orphaned).toEqual(['movies']);
-      expect(store.has('partial_ranking_movies')).toBe(false);
-      expect(store.has(INDEX_KEY)).toBe(false);
+      expect(asyncStore.has('partial_ranking_movies')).toBe(false);
+    });
+
+    it('tolerates a failed write of the completion flag', async () => {
+      mockAsync.setItem.mockRejectedValue(new Error('quota'));
+
+      await expect(reconcilePartialRankings([], NOW)).resolves.toEqual({
+        adopted: [],
+        orphaned: [],
+        expired: [],
+      });
     });
   });
 });
