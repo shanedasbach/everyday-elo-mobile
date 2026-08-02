@@ -2070,9 +2070,32 @@ describe('API Module', () => {
         );
         expect(eq).toHaveBeenCalledWith('follower_id', 'user-a');
         expect(result).toEqual([
-          { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: null },
-          { id: 'user-c', name: '', username: null, avatar_url: 'a.png' },
+          { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: undefined },
+          { id: 'user-c', name: '', username: undefined, avatar_url: 'a.png' },
         ]);
+      });
+
+      it('drops following rows whose profile embed is null', async () => {
+        const rows = [
+          { following_id: 'user-b', profiles: null },
+          { following_id: 'user-c', profiles: { id: 'user-c', name: 'Cy', username: 'cy', avatar_url: null } },
+        ];
+        const eq = jest.fn().mockResolvedValue({ data: rows, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowing('user-a')).toEqual([
+          { id: 'user-c', name: 'Cy', username: 'cy', avatar_url: undefined },
+        ]);
+      });
+
+      it('drops follower rows whose profile embed is null', async () => {
+        const rows = [{ follower_id: 'user-b', profiles: null }];
+        const eq = jest.fn().mockResolvedValue({ data: rows, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowers('user-a')).toEqual([]);
       });
 
       it('returns empty when no follows exist', async () => {
@@ -2106,7 +2129,7 @@ describe('API Module', () => {
         );
         expect(eq).toHaveBeenCalledWith('following_id', 'user-a');
         expect(result).toEqual([
-          { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: null },
+          { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: undefined },
         ]);
       });
 
@@ -2254,7 +2277,7 @@ describe('API Module', () => {
             creator_id: 'user-z',
             creator_name: 'Bea',
             creator_username: 'bea',
-            ranked_at: '2026-05-23T10:00:00Z',
+            updated_at: '2026-05-23T10:00:00Z',
             comparisons_count: 12,
           },
           {
@@ -2265,7 +2288,7 @@ describe('API Module', () => {
             creator_id: 'user-y',
             creator_name: undefined,
             creator_username: undefined,
-            ranked_at: '2026-05-22T10:00:00Z',
+            updated_at: '2026-05-22T10:00:00Z',
             comparisons_count: 0,
           },
         ]);

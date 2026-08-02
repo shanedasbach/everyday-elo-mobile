@@ -64,7 +64,12 @@ export interface FollowedListFeedEntry {
   creator_id: string;
   creator_name?: string;
   creator_username?: string;
-  ranked_at: string;
+  /**
+   * Last time the ranking row changed, not when it was completed — `rankings`
+   * has no completion timestamp. A months-old ranking that receives one more
+   * comparison moves back to the top of the feed; the name reflects that.
+   */
+  updated_at: string;
   comparisons_count: number;
 }
 
@@ -686,6 +691,34 @@ export async function isFollowing(followerId: string, followingId: string): Prom
   return (count ?? 0) > 0;
 }
 
+/** Shape of an embedded `profiles` row on a `follows` select. */
+interface EmbeddedProfile {
+  id: string;
+  name: string | null;
+  username?: string | null;
+  avatar_url?: string | null;
+}
+
+interface FollowWithProfileRow {
+  profiles: EmbeddedProfile | null;
+}
+
+/**
+ * The embed is nullable in the type system even though the FK cascades on
+ * delete, so drop rows with no profile rather than dereferencing through null
+ * and failing the whole call.
+ */
+function toProfiles(rows: FollowWithProfileRow[] | null): Profile[] {
+  return (rows || [])
+    .filter((row) => row.profiles != null)
+    .map((row) => ({
+      id: row.profiles!.id,
+      name: row.profiles!.name || '',
+      username: row.profiles!.username ?? undefined,
+      avatar_url: row.profiles!.avatar_url ?? undefined,
+    }));
+}
+
 export async function getFollowing(userId: string): Promise<Profile[]> {
   const { data, error } = await supabase
     .from('follows')
@@ -694,12 +727,7 @@ export async function getFollowing(userId: string): Promise<Profile[]> {
 
   if (error) throw error;
 
-  return (data || []).map((row: any) => ({
-    id: row.profiles.id,
-    name: row.profiles.name || '',
-    username: row.profiles.username,
-    avatar_url: row.profiles.avatar_url,
-  }));
+  return toProfiles(data as unknown as FollowWithProfileRow[] | null);
 }
 
 export async function getFollowers(userId: string): Promise<Profile[]> {
@@ -710,12 +738,7 @@ export async function getFollowers(userId: string): Promise<Profile[]> {
 
   if (error) throw error;
 
-  return (data || []).map((row: any) => ({
-    id: row.profiles.id,
-    name: row.profiles.name || '',
-    username: row.profiles.username,
-    avatar_url: row.profiles.avatar_url,
-  }));
+  return toProfiles(data as unknown as FollowWithProfileRow[] | null);
 }
 
 export async function getFollowingCount(userId: string): Promise<number> {
@@ -749,6 +772,15 @@ export async function getFollowerCount(userId: string): Promise<number> {
  * ranking rows with their list and creator. Skips the second query entirely
  * when the user follows nobody.
  */
+interface FeedRankingRow {
+  id: string;
+  list_id: string;
+  updated_at: string;
+  comparisons_count: number | null;
+  lists: { title: string | null; description: string | null; creator_id: string | null } | null;
+  profiles: { name: string | null; username: string | null } | null;
+}
+
 export async function getFollowedListsFeed(
   userId: string,
   limit = 20,
@@ -761,7 +793,9 @@ export async function getFollowedListsFeed(
 
   if (followError) throw followError;
 
-  const followingIds = (followData || []).map((f: any) => f.following_id);
+  const followingIds = ((followData || []) as unknown as { following_id: string }[]).map(
+    (f) => f.following_id
+  );
   if (followingIds.length === 0) return [];
 
   const { data: rankings, error: rankingsError } = await supabase
@@ -784,7 +818,7 @@ export async function getFollowedListsFeed(
 
   if (rankingsError) throw rankingsError;
 
-  return (rankings || []).map((r: any) => ({
+  return ((rankings || []) as unknown as FeedRankingRow[]).map((r) => ({
     ranking_id: r.id,
     list_id: r.list_id,
     title: r.lists?.title || '',
@@ -792,7 +826,7 @@ export async function getFollowedListsFeed(
     creator_id: r.lists?.creator_id || '',
     creator_name: r.profiles?.name || undefined,
     creator_username: r.profiles?.username || undefined,
-    ranked_at: r.updated_at,
+    updated_at: r.updated_at,
     comparisons_count: r.comparisons_count ?? 0,
   }));
 }

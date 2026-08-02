@@ -1,7 +1,18 @@
-import { useState, useEffect } from 'react';
-import { TouchableOpacity, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { useState, useEffect, useCallback } from 'react';
+import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { followUser, unfollowUser, isFollowing } from '../lib/api';
+import {
+  FollowState,
+  LOADING,
+  readSucceeded,
+  readFailed,
+  writeSucceeded,
+  writeFailed,
+  canToggle,
+  followLabel,
+  followErrorMessage,
+} from '../lib/follow-state';
 
 interface FollowButtonProps {
   currentUserId: string;
@@ -9,44 +20,54 @@ interface FollowButtonProps {
 }
 
 export default function FollowButton({ currentUserId, targetUserId }: FollowButtonProps) {
-  const [following, setFollowing] = useState<boolean | null>(null);
+  const [state, setState] = useState<FollowState>(LOADING);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false;
+    setState(LOADING);
     isFollowing(currentUserId, targetUserId)
       .then((result) => {
-        if (!cancelled) setFollowing(result);
+        if (!cancelled) setState(readSucceeded(result));
       })
       .catch(() => {
-        if (!cancelled) setFollowing(false);
+        // A failed read is an unknown relationship, not a negative one.
+        if (!cancelled) setState(readFailed());
       });
     return () => {
       cancelled = true;
     };
   }, [currentUserId, targetUserId]);
 
+  useEffect(() => load(), [load]);
+
   const toggle = async () => {
-    if (busy || following === null) return;
+    // An unknown state means retrying the read, not guessing at a write.
+    if (state.status === 'unknown') {
+      load();
+      return;
+    }
+    if (!canToggle(state, busy)) return;
+
     setBusy(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const wasFollowing = state.following;
     try {
-      if (following) {
+      if (wasFollowing) {
         await unfollowUser(currentUserId, targetUserId);
-        setFollowing(false);
       } else {
         await followUser(currentUserId, targetUserId);
-        setFollowing(true);
       }
+      setState(writeSucceeded(!wasFollowing));
     } catch {
-      // Surface failure by leaving state unchanged; the user can retry.
+      setState((prev) => writeFailed(prev));
     } finally {
       setBusy(false);
     }
   };
 
   if (currentUserId === targetUserId) return null;
-  if (following === null) {
+  if (state.status === 'loading') {
     return (
       <ActivityIndicator
         accessibilityLabel="Loading follow state"
@@ -56,23 +77,50 @@ export default function FollowButton({ currentUserId, targetUserId }: FollowButt
     );
   }
 
+  const error = followErrorMessage(state);
+  const isFollowingNow = state.status === 'known' && state.following;
+  const accessibilityLabel =
+    state.status === 'unknown'
+      ? 'Retry loading follow status'
+      : isFollowingNow
+        ? 'Unfollow'
+        : 'Follow';
+
   return (
-    <TouchableOpacity
-      style={[styles.button, following ? styles.following : styles.notFollowing]}
-      onPress={toggle}
-      disabled={busy}
-      accessibilityRole="button"
-      accessibilityLabel={following ? 'Unfollow' : 'Follow'}
-      accessibilityState={{ selected: following, busy }}
-    >
-      <Text style={[styles.label, following ? styles.followingLabel : styles.notFollowingLabel]}>
-        {busy ? '…' : following ? 'Following' : 'Follow'}
-      </Text>
-    </TouchableOpacity>
+    <View style={styles.wrapper}>
+      <TouchableOpacity
+        style={[styles.button, isFollowingNow ? styles.following : styles.notFollowing]}
+        onPress={toggle}
+        disabled={busy}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        accessibilityState={{ selected: isFollowingNow, busy }}
+      >
+        <Text
+          style={[styles.label, isFollowingNow ? styles.followingLabel : styles.notFollowingLabel]}
+        >
+          {followLabel(state, busy)}
+        </Text>
+      </TouchableOpacity>
+      {error && (
+        <Text style={styles.error} accessibilityRole="alert">
+          {error}
+        </Text>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  wrapper: {
+    alignItems: 'flex-end',
+  },
+  error: {
+    marginTop: 4,
+    fontSize: 11,
+    color: '#DC2626',
+    textAlign: 'right',
+  },
   button: {
     paddingHorizontal: 14,
     paddingVertical: 6,
