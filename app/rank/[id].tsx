@@ -8,7 +8,8 @@ import {
 } from 'react-native-gesture-handler';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import { expectedScore, K_FACTOR } from '../../lib/elo';
+import { expectedScore, K_FACTOR, pairKey } from '../../lib/elo';
+import { selectNextPairIndices } from '../../lib/pair-selection';
 import {
   SWIPE_THRESHOLD,
   commitTranslation,
@@ -73,6 +74,11 @@ export default function RankScreen() {
   // Express mode - auto-skip obvious matchups
   const [expressMode, setExpressMode] = useState(false);
 
+  // Matchups already shown this session, keyed order-independently by item id.
+  // A ref (not state) so handleChoice/handleSkip can read and extend it
+  // synchronously before selecting the next pair.
+  const seenPairs = useRef<Set<string>>(new Set());
+
   // Swipe gesture animation state
   const translationA = useRef(new Animated.Value(0)).current;
   const translationB = useRef(new Animated.Value(0)).current;
@@ -86,6 +92,9 @@ export default function RankScreen() {
 
   const loadList = async () => {
     if (!id) return;
+
+    // Starting/reloading a ranking begins a fresh session of shown matchups.
+    seenPairs.current = new Set();
 
     // Check if it's a template code
     const template = getTemplateById(id);
@@ -185,37 +194,13 @@ export default function RankScreen() {
   };
 
   const selectNextPair = (items: LocalRankedItem[], skipObvious: boolean = false) => {
-    if (items.length < 2) return;
+    const pair = selectNextPairIndices(items, {
+      isSeen: (a, b) => seenPairs.current.has(pairKey(items[a].itemId, items[b].itemId)),
+      skipObvious,
+    });
 
-    // Sort by comparisons (prioritize less-compared items)
-    const sorted = [...items].map((item, index) => ({ ...item, originalIndex: index }))
-      .sort((a, b) => a.comparisons - b.comparisons);
-    
-    const first = sorted[0];
-    let others = sorted.filter((_, i) => i !== 0);
-    
-    // Express mode: filter out very lopsided matchups (rating diff > 200)
-    if (skipObvious && others.length > 1) {
-      const closeOthers = others.filter(o => Math.abs(o.rating - first.rating) < 200);
-      if (closeOthers.length > 0) {
-        others = closeOthers;
-      }
-    }
-    
-    // Pick opponent with similar rating
-    others.sort((a, b) => 
-      Math.abs(a.rating - first.rating) - Math.abs(b.rating - first.rating)
-    );
-    
-    // Pick from top 3 closest
-    const candidates = others.slice(0, Math.min(3, others.length));
-    const second = candidates[Math.floor(Math.random() * candidates.length)];
-    
-    // Randomize order
-    if (Math.random() > 0.5) {
-      setCurrentPair([first.originalIndex, second.originalIndex]);
-    } else {
-      setCurrentPair([second.originalIndex, first.originalIndex]);
+    if (pair) {
+      setCurrentPair(pair);
     }
   };
 
@@ -224,7 +209,10 @@ export default function RankScreen() {
     
     const winner = rankedItems[winnerIdx];
     const loser = rankedItems[loserIdx];
-    
+
+    // Remember this matchup so it isn't surfaced again while unseen ones remain.
+    seenPairs.current.add(pairKey(winner.itemId, loser.itemId));
+
     const expectedWinner = expectedScore(winner.rating, loser.rating);
     const expectedLoser = expectedScore(loser.rating, winner.rating);
     
@@ -291,8 +279,12 @@ export default function RankScreen() {
         } catch (error) {
           console.error('Failed to mark complete:', error);
         }
-      } else if (useOfflineMode && id) {
-        // Clear partial storage once the template ranking is finished.
+      }
+
+      // Clear partial storage once the ranking is finished — including for
+      // Supabase-backed rankings, which may still carry a payload from an
+      // earlier offline session for the same id.
+      if (id) {
         try {
           await clearPartialRanking(id);
         } catch (error) {
@@ -318,7 +310,12 @@ export default function RankScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <Text style={styles.errorText}>List not found</Text>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
           <Text style={styles.backButtonText}>Go Back</Text>
         </TouchableOpacity>
       </SafeAreaView>
@@ -455,12 +452,22 @@ export default function RankScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => router.back()}
+            style={styles.backButton}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+          >
             <Text style={styles.backButtonText}>← Back</Text>
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
           {!useOfflineMode && (
-            <TouchableOpacity onPress={() => setShowAddItem(true)} style={styles.addItemButton}>
+            <TouchableOpacity
+              onPress={() => setShowAddItem(true)}
+              style={styles.addItemButton}
+              accessibilityRole="button"
+              accessibilityLabel="Add item"
+            >
               <Text style={styles.addItemText}>+ Add</Text>
             </TouchableOpacity>
           )}
@@ -474,10 +481,13 @@ export default function RankScreen() {
         
         <ScrollView style={styles.resultsList} contentContainerStyle={styles.resultsContent}>
           {sorted.map((item, index) => (
-            <TouchableOpacity 
-              key={item.id} 
+            <TouchableOpacity
+              key={item.id}
               style={styles.resultItem}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`${item.name}, ranked number ${index + 1}, rating ${item.rating}`}
+              accessibilityHint={useOfflineMode ? undefined : 'Opens actions to boost, demote, or remove this item'}
               onPress={() => {
                 if (!useOfflineMode) {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -566,6 +576,9 @@ export default function RankScreen() {
 
   const handleSkip = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // Mark the skipped matchup as seen — without this, neither item's
+    // comparison count changed, so the same pair could be handed straight back.
+    seenPairs.current.add(pairKey(itemA.itemId, itemB.itemId));
     // Select a new pair without recording anything
     selectNextPair(rankedItems, expressMode);
   };
@@ -660,7 +673,11 @@ export default function RankScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Close ranking"
+        >
           <Text style={styles.closeButton}>✕</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>{listTitle}</Text>
@@ -668,6 +685,7 @@ export default function RankScreen() {
           <TouchableOpacity
             onPress={handleSaveAndExit}
             style={styles.saveExitButton}
+            accessibilityRole="button"
             accessibilityLabel="Save and exit"
           >
             <Text style={styles.saveExitText}>💾</Text>
@@ -680,7 +698,14 @@ export default function RankScreen() {
       <View style={styles.progressContainer}>
         <View style={styles.progressHeader}>
           <Text style={styles.progressText}>{comparisons} comparisons • ~{Math.max(0, estimated - comparisons)} left</Text>
-          <TouchableOpacity onPress={toggleExpressMode} style={[styles.expressBadge, expressMode && styles.expressBadgeActive]}>
+          <TouchableOpacity
+            onPress={toggleExpressMode}
+            style={[styles.expressBadge, expressMode && styles.expressBadgeActive]}
+            accessibilityRole="button"
+            accessibilityLabel={`Express mode ${expressMode ? 'on' : 'off'}`}
+            accessibilityHint="Toggles faster ranking with fewer comparisons"
+            accessibilityState={{ selected: expressMode }}
+          >
             <Text style={[styles.expressBadgeText, expressMode && styles.expressBadgeTextActive]}>⚡ Express {expressMode ? 'ON' : 'OFF'}</Text>
           </TouchableOpacity>
         </View>
@@ -702,6 +727,8 @@ export default function RankScreen() {
               style={styles.cardInner}
               onPress={() => handleChoice(aIdx, bIdx)}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={`Choose ${itemA.name}`}
             >
               <Text style={styles.cardText}>{itemA.name}</Text>
             </TouchableOpacity>
@@ -722,6 +749,8 @@ export default function RankScreen() {
               style={styles.cardInner}
               onPress={() => handleChoice(bIdx, aIdx)}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={`Choose ${itemB.name}`}
             >
               <Text style={styles.cardText}>{itemB.name}</Text>
             </TouchableOpacity>
@@ -731,7 +760,12 @@ export default function RankScreen() {
 
       <Text style={styles.hintText}>Tap or swipe →  pick   •   swipe ←  other</Text>
 
-      <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
+      <TouchableOpacity
+        onPress={handleSkip}
+        style={styles.skipButton}
+        accessibilityRole="button"
+        accessibilityLabel="Skip this comparison"
+      >
         <Text style={styles.skipText}>Can't decide? Skip this one</Text>
       </TouchableOpacity>
     </SafeAreaView>

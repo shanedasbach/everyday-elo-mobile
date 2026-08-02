@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { clearPartialRanking } from './partial-ranking';
 
 // Types
 export interface List {
@@ -48,9 +49,86 @@ export interface ListWithStatus extends List {
   estimatedComparisons: number;
 }
 
+export interface Profile {
+  id: string;
+  name: string;
+  username?: string;
+  avatar_url?: string;
+}
+
+/**
+ * One entry in the Following feed. Every identity field here describes the
+ * **ranker** — the followed user whose completed ranking put this row in the
+ * feed — not the person who created the list. The two are routinely different
+ * (share codes mean anyone can rank anyone's list), so they do not share a
+ * field prefix and the UI must not label this "by X" the way the For You tab
+ * labels a list's actual creator.
+ */
+export interface FollowedListFeedEntry {
+  ranking_id: string;
+  list_id: string;
+  title: string;
+  description?: string;
+  ranker_id: string;
+  ranker_name?: string;
+  ranker_username?: string;
+  /**
+   * Last time the ranking row changed, not when it was completed — `rankings`
+   * has no completion timestamp. A months-old ranking that receives one more
+   * comparison moves back to the top of the feed; the name reflects that.
+   */
+  updated_at: string;
+  comparisons_count: number;
+}
+
+/**
+ * The Following feed plus the size of the follow graph it was built from.
+ *
+ * `entries` is empty for two unrelated reasons — the user follows nobody, or
+ * the people they follow have not completed a public ranking — and the UI has
+ * to say different things in each case. `following_count` separates them
+ * without a second round-trip, since the feed already reads the follow graph.
+ */
+export interface FollowedListsFeed {
+  /**
+   * Follow edges read while building this feed. Capped at
+   * `FOLLOW_GRAPH_QUERY_CAP`, so it is a lower bound once the cap is reached.
+   * Only its zero/non-zero distinction is load-bearing today.
+   */
+  following_count: number;
+  entries: FollowedListFeedEntry[];
+}
+
 // Generate random ID
 function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
+
+/**
+ * Thrown when an operation needs an owner but no valid session is available.
+ * Call sites can catch this specifically to prompt for sign-in rather than
+ * showing a generic failure.
+ */
+export class NotAuthenticatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotAuthenticatedError';
+  }
+}
+
+/**
+ * Resolve the signed-in user's id, or null if there isn't one.
+ *
+ * `supabase.auth.getUser()` validates the stored token against the server, so
+ * this returns null when a session has expired or been revoked even though the
+ * in-memory auth context still holds a user. Anything that needs an owner must
+ * go through here instead of reading `user?.id` optimistically — see
+ * `createList`.
+ */
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) return null;
+  return data?.user?.id ?? null;
 }
 
 // ============================================
@@ -62,16 +140,34 @@ export async function createList(data: {
   description?: string;
   comparison_prompt?: string;
   is_private?: boolean;
+  /**
+   * Permit creating a list with no owner (`creator_id: null`).
+   *
+   * Only the "rank something without an account" flow should set this. An
+   * unowned list never comes back from `getUserLists` (which filters on
+   * creator_id) and, under the current RLS policy, is updatable by anyone —
+   * so it has to be a deliberate choice at the call site, never a silent
+   * fallback when the session turns out to be missing.
+   */
+  allowAnonymous?: boolean;
 }): Promise<List> {
-  const { data: { user } } = await supabase.auth.getUser();
-  
+  const userId = await getAuthenticatedUserId();
+
+  if (!userId && !data.allowAnonymous) {
+    throw new NotAuthenticatedError(
+      'You must be signed in to create a list. Please sign in and try again.'
+    );
+  }
+
   const { data: list, error } = await supabase
     .from('lists')
     .insert({
       title: data.title,
       description: data.description,
       comparison_prompt: data.comparison_prompt,
-      creator_id: user?.id,
+      // Explicitly null rather than undefined, so an unowned list is a stated
+      // intent in the payload instead of an omitted column.
+      creator_id: userId,
       is_private: data.is_private || false,
       share_code: generateId().slice(0, 8),
     })
@@ -117,45 +213,55 @@ export async function getUserLists(userId: string): Promise<List[]> {
 
 export async function getUserListsWithStatus(userId: string): Promise<ListWithStatus[]> {
   const lists = await getUserLists(userId);
-  const listsWithStatus: ListWithStatus[] = [];
+  if (lists.length === 0) return [];
 
-  for (const list of lists) {
-    const items = await getListItems(list.id);
-    const itemCount = items.length;
-    
-    // Get user's ranking for this list
-    const { data: ranking, error: rankingError } = await supabase
+  const listIds = lists.map((l) => l.id);
+
+  // Batch-fetch items and rankings for all lists in two queries, regardless of N.
+  // Total round-trips: 1 lists + 1 items + 1 rankings.
+  const [itemsRes, rankingsRes] = await Promise.all([
+    supabase.from('list_items').select('list_id').in('list_id', listIds),
+    supabase
       .from('rankings')
-      .select('*')
-      .eq('list_id', list.id)
-      .eq('user_id', userId)
-      .maybeSingle();
+      .select('list_id, comparisons_count, is_complete')
+      .in('list_id', listIds)
+      .eq('user_id', userId),
+  ]);
 
-    if (rankingError) throw rankingError;
+  const itemCounts = new Map<string, number>();
+  for (const row of itemsRes.data || []) {
+    const id = (row as any).list_id;
+    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
+  }
 
+  const rankingsByList = new Map<string, { comparisons_count: number; is_complete: boolean }>();
+  for (const row of rankingsRes.data || []) {
+    const id = (row as any).list_id;
+    rankingsByList.set(id, {
+      comparisons_count: (row as any).comparisons_count,
+      is_complete: (row as any).is_complete,
+    });
+  }
+
+  return lists.map((list) => {
+    const itemCount = itemCounts.get(list.id) || 0;
+    const ranking = rankingsByList.get(list.id);
     let status: 'not_started' | 'in_progress' | 'completed' = 'not_started';
     let comparisonsCount = 0;
-    const estimatedComparisons = itemCount * 2;
 
     if (ranking) {
       comparisonsCount = ranking.comparisons_count;
-      if (ranking.is_complete) {
-        status = 'completed';
-      } else {
-        status = 'in_progress';
-      }
+      status = ranking.is_complete ? 'completed' : 'in_progress';
     }
 
-    listsWithStatus.push({
+    return {
       ...list,
       itemCount,
       rankingStatus: status,
       comparisonsCount,
-      estimatedComparisons,
-    });
-  }
-
-  return listsWithStatus;
+      estimatedComparisons: itemCount * 2,
+    };
+  });
 }
 
 export async function getTemplateLists(): Promise<List[]> {
@@ -202,8 +308,10 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     return [];
   }
 
-  // Transform the data
+  // Transform the data, tracking each list's creator so names can be
+  // resolved in a single batched query afterwards (avoids a per-list round-trip).
   const featured: FeaturedList[] = [];
+  const creatorIdByListId = new Map<string, string>();
   for (const item of data || []) {
     const list = item.lists as any;
     if (!list) continue;
@@ -220,6 +328,10 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
 
+    if (list.creator_id) {
+      creatorIdByListId.set(list.id, list.creator_id);
+    }
+
     featured.push({
       id: item.id,
       list_id: list.id,
@@ -229,6 +341,33 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       item_count: itemCount || 0,
       ranking_count: rankingCount || 0,
     });
+  }
+
+  // Resolve creator display names in a single batched query, then map onto
+  // each featured list. Unresolved creators simply leave creator_name undefined.
+  const creatorIds = Array.from(new Set(creatorIdByListId.values()));
+  if (creatorIds.length > 0) {
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, name')
+      .in('id', creatorIds);
+
+    if (profilesError) {
+      console.log('Creator names not available:', profilesError.message);
+    } else {
+      const nameById = new Map<string, string>();
+      for (const profile of profiles || []) {
+        if (profile?.id && profile.name) {
+          nameById.set(profile.id, profile.name);
+        }
+      }
+      for (const entry of featured) {
+        const creatorId = creatorIdByListId.get(entry.list_id);
+        if (creatorId) {
+          entry.creator_name = nameById.get(creatorId);
+        }
+      }
+    }
   }
 
   return featured;
@@ -241,6 +380,16 @@ export async function deleteList(id: string): Promise<void> {
     .eq('id', id);
 
   if (error) throw error;
+
+  // The list id is the only handle on its local partial ranking; once the row
+  // is gone nothing can ever discover that key again, so clear it here.
+  // Best-effort: the remote delete already succeeded, and failing the call
+  // would tell the caller the list still exists.
+  try {
+    await clearPartialRanking(id);
+  } catch (localError) {
+    console.error('Failed to clear partial ranking for deleted list:', localError);
+  }
 }
 
 // ============================================
@@ -284,12 +433,30 @@ export async function addListItem(listId: string, name: string): Promise<ListIte
 }
 
 export async function addListItems(listId: string, names: string[]): Promise<ListItem[]> {
-  const items: ListItem[] = [];
-  for (let i = 0; i < names.length; i++) {
-    const item = await addListItem(listId, names[i]);
-    items.push(item);
-  }
-  return items;
+  if (names.length === 0) return [];
+
+  const { data: existing } = await supabase
+    .from('list_items')
+    .select('display_order')
+    .eq('list_id', listId)
+    .order('display_order', { ascending: false })
+    .limit(1);
+
+  const maxOrder = existing?.[0]?.display_order ?? -1;
+
+  const rows = names.map((name, i) => ({
+    list_id: listId,
+    name,
+    display_order: maxOrder + 1 + i,
+  }));
+
+  const { data, error } = await supabase
+    .from('list_items')
+    .insert(rows)
+    .select();
+
+  if (error) throw error;
+  return data || [];
 }
 
 export async function deleteListItem(id: string): Promise<void> {
@@ -335,13 +502,15 @@ export async function createRanking(listId: string, userId?: string): Promise<Ra
 
   // Initialize ranked items
   const items = await getListItems(listId);
-  for (const item of items) {
-    await supabase.from('ranked_items').insert({
+  if (items.length > 0) {
+    const rows = items.map((item) => ({
       ranking_id: ranking.id,
       item_id: item.id,
       rating: 1500,
       comparisons: 0,
-    });
+    }));
+    const { error: insertError } = await supabase.from('ranked_items').insert(rows);
+    if (insertError) throw insertError;
   }
 
   return ranking;
@@ -409,21 +578,13 @@ export async function updateRankedItem(
 }
 
 export async function incrementComparisonsCount(rankingId: string): Promise<void> {
-  const { data: ranking } = await supabase
-    .from('rankings')
-    .select('comparisons_count')
-    .eq('id', rankingId)
-    .single();
+  // Atomic increment via RPC — see supabase/migrations/20260523000000_increment_comparisons_count.sql.
+  // A read-then-update would race when concurrent comparisons land on the same ranking.
+  const { error } = await supabase.rpc('increment_comparisons_count', {
+    p_ranking_id: rankingId,
+  });
 
-  if (ranking) {
-    await supabase
-      .from('rankings')
-      .update({ 
-        comparisons_count: ranking.comparisons_count + 1,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', rankingId);
-  }
+  if (error) throw error;
 }
 
 export async function markRankingComplete(rankingId: string): Promise<void> {
@@ -516,4 +677,203 @@ export async function duplicateList(sourceListId: string): Promise<List> {
   }
 
   return newList;
+}
+
+// ============================================
+// SOCIAL: FOLLOWS
+// ============================================
+// Mirrors the web app store API (everyday-elo/src/lib/store/index.ts) against
+// the shared `follows` table. RLS enforces that only the authenticated user
+// can create/delete rows where follower_id = auth.uid().
+
+export async function followUser(followerId: string, followingId: string): Promise<void> {
+  if (followerId === followingId) {
+    throw new Error('Cannot follow yourself');
+  }
+
+  const { error } = await supabase
+    .from('follows')
+    .insert({ follower_id: followerId, following_id: followingId });
+
+  if (error) throw error;
+}
+
+export async function unfollowUser(followerId: string, followingId: string): Promise<void> {
+  const { error } = await supabase
+    .from('follows')
+    .delete()
+    .eq('follower_id', followerId)
+    .eq('following_id', followingId);
+
+  if (error) throw error;
+}
+
+export async function isFollowing(followerId: string, followingId: string): Promise<boolean> {
+  const { count } = await supabase
+    .from('follows')
+    .select('*', { count: 'exact', head: true })
+    .eq('follower_id', followerId)
+    .eq('following_id', followingId);
+
+  return (count ?? 0) > 0;
+}
+
+/** Shape of an embedded `profiles` row on a `follows` select. */
+interface EmbeddedProfile {
+  id: string;
+  name: string | null;
+  username?: string | null;
+  avatar_url?: string | null;
+}
+
+interface FollowWithProfileRow {
+  profiles: EmbeddedProfile | null;
+}
+
+/**
+ * The embed is nullable in the type system even though the FK cascades on
+ * delete, so drop rows with no profile rather than dereferencing through null
+ * and failing the whole call.
+ */
+function toProfiles(rows: FollowWithProfileRow[] | null): Profile[] {
+  return (rows || [])
+    .filter((row) => row.profiles != null)
+    .map((row) => ({
+      id: row.profiles!.id,
+      name: row.profiles!.name || '',
+      username: row.profiles!.username ?? undefined,
+      avatar_url: row.profiles!.avatar_url ?? undefined,
+    }));
+}
+
+export async function getFollowing(userId: string): Promise<Profile[]> {
+  const { data, error } = await supabase
+    .from('follows')
+    .select('following_id, profiles!follows_following_id_fkey(id, name, username, avatar_url)')
+    .eq('follower_id', userId);
+
+  if (error) throw error;
+
+  return toProfiles(data as unknown as FollowWithProfileRow[] | null);
+}
+
+export async function getFollowers(userId: string): Promise<Profile[]> {
+  const { data, error } = await supabase
+    .from('follows')
+    .select('follower_id, profiles!follows_follower_id_fkey(id, name, username, avatar_url)')
+    .eq('following_id', userId);
+
+  if (error) throw error;
+
+  return toProfiles(data as unknown as FollowWithProfileRow[] | null);
+}
+
+export async function getFollowingCount(userId: string): Promise<number> {
+  const { count } = await supabase
+    .from('follows')
+    .select('*', { count: 'exact', head: true })
+    .eq('follower_id', userId);
+
+  return count ?? 0;
+}
+
+export async function getFollowerCount(userId: string): Promise<number> {
+  const { count } = await supabase
+    .from('follows')
+    .select('*', { count: 'exact', head: true })
+    .eq('following_id', userId);
+
+  return count ?? 0;
+}
+
+// ============================================
+// SOCIAL: FOLLOWED LISTS FEED
+// ============================================
+
+/**
+ * Most follow edges the feed will put into a single `.in(...)` filter.
+ *
+ * Every id goes into the PostgREST GET query string, so an unbounded follow
+ * graph eventually produces a hard 414/431 from PostgREST or an intermediary
+ * rather than a slow query. Capping keeps the feed working past that point at
+ * the cost of covering only the most recent follows; the real fix is an RPC
+ * that joins the graph server-side, which is a schema change and out of scope
+ * here.
+ */
+export const FOLLOW_GRAPH_QUERY_CAP = 200;
+
+/**
+ * Recent completed rankings made by people the user follows, on lists that
+ * are public (not private, not templates). Powers the "Following" tab on the
+ * browse screen.
+ *
+ * Two round-trips: one to read the follow graph, one to fetch enriched
+ * ranking rows with their list and ranker. Skips the second query entirely
+ * when the user follows nobody.
+ */
+interface FeedRankingRow {
+  id: string;
+  list_id: string;
+  updated_at: string;
+  comparisons_count: number | null;
+  lists: { title: string | null; description: string | null } | null;
+  profiles: { id: string | null; name: string | null; username: string | null } | null;
+}
+
+export async function getFollowedListsFeed(
+  userId: string,
+  limit = 20,
+  offset = 0
+): Promise<FollowedListsFeed> {
+  // Newest follows first, so a graph past the cap keeps the most recent ones.
+  const { data: followData, error: followError } = await supabase
+    .from('follows')
+    .select('following_id')
+    .eq('follower_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(FOLLOW_GRAPH_QUERY_CAP);
+
+  if (followError) throw followError;
+
+  const followingIds = ((followData || []) as unknown as { following_id: string }[]).map(
+    (f) => f.following_id
+  );
+  if (followingIds.length === 0) return { following_count: 0, entries: [] };
+
+  const { data: rankings, error: rankingsError } = await supabase
+    .from('rankings')
+    .select(`
+      id,
+      list_id,
+      user_id,
+      comparisons_count,
+      updated_at,
+      lists!inner(id, title, description, is_private, is_template),
+      profiles!rankings_user_id_fkey(id, name, username)
+    `)
+    .in('user_id', followingIds)
+    .eq('is_complete', true)
+    .eq('lists.is_private', false)
+    .eq('lists.is_template', false)
+    .order('updated_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (rankingsError) throw rankingsError;
+
+  // Every identity below comes from `profiles!rankings_user_id_fkey` — the
+  // ranker. `lists.creator_id` is deliberately not surfaced: it is a different
+  // person, and the previous struct mixed the two under one `creator_` prefix.
+  const entries = ((rankings || []) as unknown as FeedRankingRow[]).map((r) => ({
+    ranking_id: r.id,
+    list_id: r.list_id,
+    title: r.lists?.title || '',
+    description: r.lists?.description || undefined,
+    ranker_id: r.profiles?.id || '',
+    ranker_name: r.profiles?.name || undefined,
+    ranker_username: r.profiles?.username || undefined,
+    updated_at: r.updated_at,
+    comparisons_count: r.comparisons_count ?? 0,
+  }));
+
+  return { following_count: followingIds.length, entries };
 }

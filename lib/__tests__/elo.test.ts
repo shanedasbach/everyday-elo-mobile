@@ -19,6 +19,7 @@ import {
   initializeItems,
   getRankedItems,
   selectNextPair,
+  pairKey,
   estimateComparisonsNeeded,
   isRankingStable,
   K_FACTOR,
@@ -413,8 +414,8 @@ describe('ELO Ranking System', () => {
           const pair = selectNextPair(items);
           if (!pair) break;
           
-          const pairKey = [pair[0].id, pair[1].id].sort().join('-');
-          seenPairs.add(pairKey);
+          const key = [pair[0].id, pair[1].id].sort().join('-');
+          seenPairs.add(key);
           
           // Simulate comparison
           items = items.map(item => {
@@ -427,6 +428,130 @@ describe('ELO Ranking System', () => {
         
         // Should have seen all 3 possible pairs: 1-2, 1-3, 2-3
         expect(seenPairs.size).toBe(3);
+      });
+    });
+
+    describe('avoiding already-shown matchups', () => {
+      const four = (): EloItem[] => [
+        { id: 'a', name: 'A', rating: 1500, comparisons: 0 },
+        { id: 'b', name: 'B', rating: 1500, comparisons: 0 },
+        { id: 'c', name: 'C', rating: 1500, comparisons: 0 },
+        { id: 'd', name: 'D', rating: 1500, comparisons: 0 },
+      ];
+
+      const keyOf = (pair: [EloItem, EloItem]) => pairKey(pair[0].id, pair[1].id);
+
+      it('should never return a seen pair while an unseen one exists', () => {
+        const items = four();
+        const seen = new Set([pairKey('a', 'b')]);
+
+        // Randomness lives in opponent selection, so sample repeatedly.
+        for (let i = 0; i < 50; i++) {
+          const pair = selectNextPair(items, seen)!;
+          expect(seen.has(keyOf(pair))).toBe(false);
+        }
+      });
+
+      it('should treat pair keys as order-independent (A-B == B-A)', () => {
+        const items = four();
+        // Seed the set in the reverse order from how the pair is built.
+        const seen = new Set([pairKey('b', 'a')]);
+
+        for (let i = 0; i < 50; i++) {
+          const pair = selectNextPair(items, seen)!;
+          expect(keyOf(pair)).not.toBe(pairKey('a', 'b'));
+        }
+      });
+
+      it('should skip to the next least-compared item when its own matchups are exhausted', () => {
+        const items: EloItem[] = [
+          { id: 'a', name: 'A', rating: 1500, comparisons: 0 },
+          { id: 'b', name: 'B', rating: 1500, comparisons: 1 },
+          { id: 'c', name: 'C', rating: 1500, comparisons: 2 },
+          { id: 'd', name: 'D', rating: 1500, comparisons: 3 },
+        ];
+        // Every matchup for the least-compared item (A) has been shown.
+        const seen = new Set([
+          pairKey('a', 'b'),
+          pairKey('a', 'c'),
+          pairKey('a', 'd'),
+        ]);
+
+        for (let i = 0; i < 50; i++) {
+          const pair = selectNextPair(items, seen)!;
+          expect(seen.has(keyOf(pair))).toBe(false);
+          // B is the next least-compared item with an unseen opponent.
+          expect(pair.map(p => p.name)).toContain('B');
+        }
+      });
+
+      it('should still prioritize the least-compared item when it has unseen matchups', () => {
+        const items: EloItem[] = [
+          { id: 'a', name: 'Few', rating: 1500, comparisons: 0 },
+          { id: 'b', name: 'Many', rating: 1500, comparisons: 9 },
+          { id: 'c', name: 'More', rating: 1500, comparisons: 9 },
+        ];
+        const seen = new Set([pairKey('a', 'b')]);
+
+        for (let i = 0; i < 20; i++) {
+          const pair = selectNextPair(items, seen)!;
+          expect(pair.map(p => p.name).sort()).toEqual(['Few', 'More']);
+        }
+      });
+
+      it('should fall back to a seen pair once every matchup is exhausted', () => {
+        const items: EloItem[] = [
+          { id: 'a', name: 'A', rating: 1500, comparisons: 0 },
+          { id: 'b', name: 'B', rating: 1500, comparisons: 0 },
+          { id: 'c', name: 'C', rating: 1500, comparisons: 0 },
+        ];
+        const seen = new Set([
+          pairKey('a', 'b'),
+          pairKey('a', 'c'),
+          pairKey('b', 'c'),
+        ]);
+
+        const pair = selectNextPair(items, seen);
+        expect(pair).not.toBeNull();
+        expect(pair![0].id).not.toBe(pair![1].id);
+        expect(seen.has(keyOf(pair!))).toBe(true);
+      });
+
+      it('should exhaust every distinct matchup before repeating any', () => {
+        const items = four();
+        const seen = new Set<string>();
+        const drawn: string[] = [];
+
+        // 4 items => 6 distinct pairs.
+        for (let i = 0; i < 6; i++) {
+          const pair = selectNextPair(items, seen)!;
+          const key = keyOf(pair);
+          drawn.push(key);
+          seen.add(key);
+        }
+
+        expect(new Set(drawn).size).toBe(6);
+      });
+
+      it('should behave as before when no seen set is supplied', () => {
+        const items = four();
+        const pair = selectNextPair(items);
+        expect(pair).toHaveLength(2);
+        expect(pair![0].id).not.toBe(pair![1].id);
+      });
+    });
+
+    describe('pair keys (pairKey)', () => {
+      it('should produce the same key regardless of argument order', () => {
+        expect(pairKey('a', 'b')).toBe(pairKey('b', 'a'));
+      });
+
+      it('should produce different keys for different pairs', () => {
+        expect(pairKey('a', 'b')).not.toBe(pairKey('a', 'c'));
+      });
+
+      it('should not collide across ids that share a prefix', () => {
+        expect(pairKey('item-1', 'item-12')).not.toBe(pairKey('item-11', 'item-2'));
       });
     });
   });
