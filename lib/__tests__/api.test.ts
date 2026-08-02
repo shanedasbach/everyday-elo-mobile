@@ -71,6 +71,7 @@ import {
   getFollowingCount,
   getFollowerCount,
   getFollowedListsFeed,
+  FOLLOW_GRAPH_QUERY_CAP,
   NotAuthenticatedError,
   List,
   ListItem,
@@ -2187,177 +2188,189 @@ describe('API Module', () => {
     });
 
     describe('getFollowedListsFeed', () => {
-      it('returns empty when the user follows nobody', async () => {
-        const eq = jest.fn().mockResolvedValue({ data: [], error: null });
-        const select = jest.fn().mockReturnValue({ eq });
-        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+      // The follow query is `select().eq().order().limit()`; these helpers keep
+      // the six tests below from re-declaring the same chain each time.
+      const followChain = (result: any) => {
+        const limitFn = jest.fn().mockResolvedValue(result);
+        const orderFn = jest.fn().mockReturnValue({ limit: limitFn });
+        const eqFn = jest.fn().mockReturnValue({ order: orderFn });
+        const selectFn = jest.fn().mockReturnValue({ eq: eqFn });
+        return { select: selectFn, eq: eqFn, order: orderFn, limit: limitFn };
+      };
 
-        const result = await getFollowedListsFeed('user-a');
-
-        expect(result).toEqual([]);
-        expect(mockSupabase.from).toHaveBeenCalledTimes(1);
-        expect(mockSupabase.from).toHaveBeenCalledWith('follows');
-      });
-
-      it('returns empty when follow query returns null', async () => {
-        const eq = jest.fn().mockResolvedValue({ data: null, error: null });
-        const select = jest.fn().mockReturnValue({ eq });
-        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
-
-        expect(await getFollowedListsFeed('user-a')).toEqual([]);
-      });
-
-      it('throws when the follow query errors', async () => {
-        const eq = jest.fn().mockResolvedValue({ data: null, error: { message: 'boom' } });
-        const select = jest.fn().mockReturnValue({ eq });
-        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
-
-        await expect(getFollowedListsFeed('user-a')).rejects.toEqual({ message: 'boom' });
-      });
-
-      it('maps ranking rows to feed entries', async () => {
-        const followRows = [{ following_id: 'user-b' }, { following_id: 'user-c' }];
-        const rankingRows = [
-          {
-            id: 'r1',
-            list_id: 'list-1',
-            user_id: 'user-b',
-            comparisons_count: 12,
-            updated_at: '2026-05-23T10:00:00Z',
-            lists: { id: 'list-1', title: 'Pizza', description: 'Toppings', creator_id: 'user-z' },
-            profiles: { id: 'user-b', name: 'Bea', username: 'bea' },
-          },
-          {
-            id: 'r2',
-            list_id: 'list-2',
-            user_id: 'user-c',
-            comparisons_count: null,
-            updated_at: '2026-05-22T10:00:00Z',
-            lists: { id: 'list-2', title: 'Cars', description: null, creator_id: 'user-y' },
-            profiles: null,
-          },
-        ];
-
-        const followEq = jest.fn().mockResolvedValue({ data: followRows, error: null });
-        const followSelect = jest.fn().mockReturnValue({ eq: followEq });
-
-        const rangeFn = jest.fn().mockResolvedValue({ data: rankingRows, error: null });
+      const rankingsChainFor = (result: any) => {
+        const rangeFn = jest.fn().mockResolvedValue(result);
         const orderFn = jest.fn().mockReturnValue({ range: rangeFn });
-        const rankingsChain: any = { select: jest.fn(), in: jest.fn(), eq: jest.fn(), order: orderFn };
-        rankingsChain.select.mockReturnValue(rankingsChain);
-        rankingsChain.in.mockReturnValue(rankingsChain);
-        rankingsChain.eq.mockReturnValue(rankingsChain);
+        const chain: any = {
+          select: jest.fn(),
+          in: jest.fn(),
+          eq: jest.fn(),
+          order: orderFn,
+          rangeFn,
+        };
+        chain.select.mockReturnValue(chain);
+        chain.in.mockReturnValue(chain);
+        chain.eq.mockReturnValue(chain);
+        return chain;
+      };
 
+      const wireFrom = (follow: ReturnType<typeof followChain>, rankings: any) => {
         let call = 0;
         (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
           call++;
           if (call === 1) {
             expect(table).toBe('follows');
-            return { select: followSelect };
+            return { select: follow.select };
           }
           expect(table).toBe('rankings');
-          return rankingsChain;
+          return rankings;
         });
+      };
 
-        const result = await getFollowedListsFeed('user-a', 5, 10);
+      it('returns a zero follow count and no entries when the user follows nobody', async () => {
+        const follow = followChain({ data: [], error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
 
-        expect(rankingsChain.in).toHaveBeenCalledWith('user_id', ['user-b', 'user-c']);
-        expect(rankingsChain.eq).toHaveBeenCalledWith('is_complete', true);
-        expect(rankingsChain.eq).toHaveBeenCalledWith('lists.is_private', false);
-        expect(rankingsChain.eq).toHaveBeenCalledWith('lists.is_template', false);
-        expect(orderFn).toHaveBeenCalledWith('updated_at', { ascending: false });
-        expect(rangeFn).toHaveBeenCalledWith(10, 14);
+        const result = await getFollowedListsFeed('user-a');
 
-        expect(result).toEqual([
-          {
-            ranking_id: 'r1',
-            list_id: 'list-1',
-            title: 'Pizza',
-            description: 'Toppings',
-            creator_id: 'user-z',
-            creator_name: 'Bea',
-            creator_username: 'bea',
-            updated_at: '2026-05-23T10:00:00Z',
-            comparisons_count: 12,
-          },
-          {
-            ranking_id: 'r2',
-            list_id: 'list-2',
-            title: 'Cars',
-            description: undefined,
-            creator_id: 'user-y',
-            creator_name: undefined,
-            creator_username: undefined,
-            updated_at: '2026-05-22T10:00:00Z',
-            comparisons_count: 0,
-          },
-        ]);
+        expect(result).toEqual({ following_count: 0, entries: [] });
+        expect(mockSupabase.from).toHaveBeenCalledTimes(1);
+        expect(mockSupabase.from).toHaveBeenCalledWith('follows');
       });
 
-      it('uses default limit and offset', async () => {
-        const followRows = [{ following_id: 'user-b' }];
-        const followEq = jest.fn().mockResolvedValue({ data: followRows, error: null });
-        const followSelect = jest.fn().mockReturnValue({ eq: followEq });
+      it('returns empty when follow query returns null', async () => {
+        const follow = followChain({ data: null, error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
 
-        const rangeFn = jest.fn().mockResolvedValue({ data: [], error: null });
-        const orderFn = jest.fn().mockReturnValue({ range: rangeFn });
-        const rankingsChain: any = { select: jest.fn(), in: jest.fn(), eq: jest.fn(), order: orderFn };
-        rankingsChain.select.mockReturnValue(rankingsChain);
-        rankingsChain.in.mockReturnValue(rankingsChain);
-        rankingsChain.eq.mockReturnValue(rankingsChain);
-
-        let call = 0;
-        (mockSupabase.from as jest.Mock).mockImplementation(() => {
-          call++;
-          if (call === 1) return { select: followSelect };
-          return rankingsChain;
+        expect(await getFollowedListsFeed('user-a')).toEqual({
+          following_count: 0,
+          entries: [],
         });
+      });
+
+      it('caps the follow graph and takes the most recent follows', async () => {
+        const follow = followChain({ data: [], error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
 
         await getFollowedListsFeed('user-a');
 
-        expect(rangeFn).toHaveBeenCalledWith(0, 19);
+        expect(follow.eq).toHaveBeenCalledWith('follower_id', 'user-a');
+        expect(follow.order).toHaveBeenCalledWith('created_at', { ascending: false });
+        expect(follow.limit).toHaveBeenCalledWith(FOLLOW_GRAPH_QUERY_CAP);
+      });
+
+      it('throws when the follow query errors', async () => {
+        const follow = followChain({ data: null, error: { message: 'boom' } });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
+
+        await expect(getFollowedListsFeed('user-a')).rejects.toEqual({ message: 'boom' });
+      });
+
+      it('maps ranking rows to feed entries attributed to the ranker', async () => {
+        const follow = followChain({
+          data: [{ following_id: 'user-b' }, { following_id: 'user-c' }],
+          error: null,
+        });
+        // list-1 was created by user-z but ranked by the followed user Bea —
+        // the case that made the old `creator_*` naming misattribute the card.
+        const rankings = rankingsChainFor({
+          data: [
+            {
+              id: 'r1',
+              list_id: 'list-1',
+              user_id: 'user-b',
+              comparisons_count: 12,
+              updated_at: '2026-05-23T10:00:00Z',
+              lists: { id: 'list-1', title: 'Pizza', description: 'Toppings' },
+              profiles: { id: 'user-b', name: 'Bea', username: 'bea' },
+            },
+            {
+              id: 'r2',
+              list_id: 'list-2',
+              user_id: 'user-c',
+              comparisons_count: null,
+              updated_at: '2026-05-22T10:00:00Z',
+              lists: { id: 'list-2', title: 'Cars', description: null },
+              profiles: null,
+            },
+          ],
+          error: null,
+        });
+        wireFrom(follow, rankings);
+
+        const result = await getFollowedListsFeed('user-a', 5, 10);
+
+        expect(rankings.in).toHaveBeenCalledWith('user_id', ['user-b', 'user-c']);
+        expect(rankings.eq).toHaveBeenCalledWith('is_complete', true);
+        expect(rankings.eq).toHaveBeenCalledWith('lists.is_private', false);
+        expect(rankings.eq).toHaveBeenCalledWith('lists.is_template', false);
+        expect(rankings.order).toHaveBeenCalledWith('updated_at', { ascending: false });
+        expect(rankings.rangeFn).toHaveBeenCalledWith(10, 14);
+
+        expect(result).toEqual({
+          following_count: 2,
+          entries: [
+            {
+              ranking_id: 'r1',
+              list_id: 'list-1',
+              title: 'Pizza',
+              description: 'Toppings',
+              ranker_id: 'user-b',
+              ranker_name: 'Bea',
+              ranker_username: 'bea',
+              updated_at: '2026-05-23T10:00:00Z',
+              comparisons_count: 12,
+            },
+            {
+              ranking_id: 'r2',
+              list_id: 'list-2',
+              title: 'Cars',
+              description: undefined,
+              ranker_id: '',
+              ranker_name: undefined,
+              ranker_username: undefined,
+              updated_at: '2026-05-22T10:00:00Z',
+              comparisons_count: 0,
+            },
+          ],
+        });
+      });
+
+      it('reports a non-zero follow count when followed users have no rankings', async () => {
+        // The state that used to render "No one to follow yet": the user does
+        // follow people, none of whom have completed a public ranking.
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        wireFrom(follow, rankingsChainFor({ data: [], error: null }));
+
+        expect(await getFollowedListsFeed('user-a')).toEqual({
+          following_count: 1,
+          entries: [],
+        });
+      });
+
+      it('uses default limit and offset', async () => {
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        const rankings = rankingsChainFor({ data: [], error: null });
+        wireFrom(follow, rankings);
+
+        await getFollowedListsFeed('user-a');
+
+        expect(rankings.rangeFn).toHaveBeenCalledWith(0, 19);
       });
 
       it('handles null ranking response gracefully', async () => {
-        const followRows = [{ following_id: 'user-b' }];
-        const followEq = jest.fn().mockResolvedValue({ data: followRows, error: null });
-        const followSelect = jest.fn().mockReturnValue({ eq: followEq });
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        wireFrom(follow, rankingsChainFor({ data: null, error: null }));
 
-        const rangeFn = jest.fn().mockResolvedValue({ data: null, error: null });
-        const orderFn = jest.fn().mockReturnValue({ range: rangeFn });
-        const rankingsChain: any = { select: jest.fn(), in: jest.fn(), eq: jest.fn(), order: orderFn };
-        rankingsChain.select.mockReturnValue(rankingsChain);
-        rankingsChain.in.mockReturnValue(rankingsChain);
-        rankingsChain.eq.mockReturnValue(rankingsChain);
-
-        let call = 0;
-        (mockSupabase.from as jest.Mock).mockImplementation(() => {
-          call++;
-          if (call === 1) return { select: followSelect };
-          return rankingsChain;
+        expect(await getFollowedListsFeed('user-a')).toEqual({
+          following_count: 1,
+          entries: [],
         });
-
-        expect(await getFollowedListsFeed('user-a')).toEqual([]);
       });
 
       it('throws when the rankings query errors', async () => {
-        const followRows = [{ following_id: 'user-b' }];
-        const followEq = jest.fn().mockResolvedValue({ data: followRows, error: null });
-        const followSelect = jest.fn().mockReturnValue({ eq: followEq });
-
-        const rangeFn = jest.fn().mockResolvedValue({ data: null, error: { message: 'boom' } });
-        const orderFn = jest.fn().mockReturnValue({ range: rangeFn });
-        const rankingsChain: any = { select: jest.fn(), in: jest.fn(), eq: jest.fn(), order: orderFn };
-        rankingsChain.select.mockReturnValue(rankingsChain);
-        rankingsChain.in.mockReturnValue(rankingsChain);
-        rankingsChain.eq.mockReturnValue(rankingsChain);
-
-        let call = 0;
-        (mockSupabase.from as jest.Mock).mockImplementation(() => {
-          call++;
-          if (call === 1) return { select: followSelect };
-          return rankingsChain;
-        });
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        wireFrom(follow, rankingsChainFor({ data: null, error: { message: 'boom' } }));
 
         await expect(getFollowedListsFeed('user-a')).rejects.toEqual({ message: 'boom' });
       });

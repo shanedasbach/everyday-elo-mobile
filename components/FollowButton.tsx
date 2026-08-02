@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { followUser, unfollowUser, isFollowing } from '../lib/api';
@@ -22,9 +22,17 @@ interface FollowButtonProps {
 export default function FollowButton({ currentUserId, targetUserId }: FollowButtonProps) {
   const [state, setState] = useState<FollowState>(LOADING);
   const [busy, setBusy] = useState(false);
+  // Cancels the latest read, whether the effect or the retry path started it.
+  const cancelRead = useRef<(() => void) | null>(null);
 
   const load = useCallback(() => {
+    cancelRead.current?.();
     let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+    };
+    cancelRead.current = cancel;
+
     setState(LOADING);
     isFollowing(currentUserId, targetUserId)
       .then((result) => {
@@ -34,12 +42,15 @@ export default function FollowButton({ currentUserId, targetUserId }: FollowButt
         // A failed read is an unknown relationship, not a negative one.
         if (!cancelled) setState(readFailed());
       });
-    return () => {
-      cancelled = true;
-    };
+    return cancel;
   }, [currentUserId, targetUserId]);
 
-  useEffect(() => load(), [load]);
+  useEffect(() => {
+    load();
+    // Reads the ref rather than closing over this call's canceller, so a retry
+    // read started from `toggle` is guarded on unmount too.
+    return () => cancelRead.current?.();
+  }, [load]);
 
   const toggle = async () => {
     // An unknown state means retrying the read, not guessing at a write.
