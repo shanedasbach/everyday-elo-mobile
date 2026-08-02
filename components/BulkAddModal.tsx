@@ -87,11 +87,20 @@ export default function BulkAddModal({ visible, onClose, onAdd, existingItems }:
         
         <View style={styles.sheet}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={handleClose}>
+            <TouchableOpacity
+              onPress={handleClose}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel"
+            >
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
             <Text style={styles.title}>Bulk Add Items</Text>
-            <TouchableOpacity onPress={handleAdd}>
+            <TouchableOpacity
+              onPress={handleAdd}
+              accessibilityRole="button"
+              accessibilityLabel={itemCount > 0 ? `Add ${itemCount} items` : 'Add items'}
+              accessibilityState={{ disabled: itemCount === 0 }}
+            >
               <Text style={[styles.addText, itemCount === 0 && styles.addTextDisabled]}>
                 Add{itemCount > 0 ? ` (${itemCount})` : ''}
               </Text>
