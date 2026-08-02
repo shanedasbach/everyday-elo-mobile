@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, RefreshControl, ActivityIndicator, Alert } from 'react-native';
 import { Link, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth-context';
@@ -53,6 +53,10 @@ export default function MyListsScreen() {
     loadLists();
   };
 
+  // Orphaned: no UI in this screen calls this, so the delete affordance on the
+  // My Lists tab does not exist. Suppressed rather than deleted because whether
+  // the tab should regain a delete action is a product call, not a lint fix.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleDelete = (listId: string) => {
     const listToDelete = lists.find(l => l.id === listId);
     Alert.alert(

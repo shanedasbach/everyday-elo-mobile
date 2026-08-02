@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, TextInput, ActivityIndicator } from 'react-native';
 import { Link, useFocusEffect } from 'expo-router';
 import { useAuth } from '../../lib/auth-context';
@@ -72,7 +72,7 @@ export default function ProfileScreen() {
   const handleSignOut = async () => {
     try {
       await signOut();
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to sign out');
     }
   };

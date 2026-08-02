@@ -304,7 +304,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     .limit(20);
 
   if (error) {
-    console.log('Featured lists not available:', error.message);
+    console.warn('Featured lists not available:', error.message);
     return [];
   }
 
@@ -353,7 +353,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .in('id', creatorIds);
 
     if (profilesError) {
-      console.log('Creator names not available:', profilesError.message);
+      console.warn('Creator names not available:', profilesError.message);
     } else {
       const nameById = new Map<string, string>();
       for (const profile of profiles || []) {

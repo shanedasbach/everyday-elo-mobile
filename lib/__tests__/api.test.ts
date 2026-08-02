@@ -702,15 +702,13 @@ describe('API Module', () => {
         ];
 
         let singleCalls = 0;
-        let orderCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
-          order: jest.fn().mockImplementation(() => {
-            orderCalls++;
-            return Promise.resolve({ data: listItems, error: null });
-          }),
+          order: jest
+            .fn()
+            .mockImplementation(() => Promise.resolve({ data: listItems, error: null })),
           single: jest.fn().mockImplementation(() => {
             singleCalls++;
             if (singleCalls === 1) {

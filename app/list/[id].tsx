@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { 
   View, 
   Text, 
@@ -261,7 +261,7 @@ export default function ListDetailScreen() {
         <View style={styles.emptyState}>
           <Text style={styles.emptyEmoji}>🔍</Text>
           <Text style={styles.emptyTitle}>List not found</Text>
-          <Text style={styles.emptyText}>This list may have been deleted or doesn't exist.</Text>
+          <Text style={styles.emptyText}>This list may have been deleted or doesn&apos;t exist.</Text>
         </View>
       </SafeAreaView>
     );
@@ -320,7 +320,7 @@ export default function ListDetailScreen() {
             )}
           </View>
           
-          {items.map((item, index) => (
+          {items.map((item) => (
             <View key={item.id} style={styles.itemRow}>
               {rankingStatus === 'completed' && item.rank && (
                 <View style={[
