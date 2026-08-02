@@ -43,6 +43,8 @@ export default function ListActionSheet({ visible, onClose, title, actions }: Li
                 style={[styles.actionButton, index < actions.length - 1 && styles.actionBorder]}
                 onPress={() => handleAction(action)}
                 activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={action.label}
               >
                 <Text style={styles.actionIcon}>{action.icon}</Text>
                 <Text style={[styles.actionLabel, action.destructive && styles.destructiveLabel]}>
@@ -52,7 +54,12 @@ export default function ListActionSheet({ visible, onClose, title, actions }: Li
             ))}
           </View>
           
-          <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
+          <TouchableOpacity
+            style={styles.cancelButton}
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel"
+          >
             <Text style={styles.cancelLabel}>Cancel</Text>
           </TouchableOpacity>
         </Pressable>
