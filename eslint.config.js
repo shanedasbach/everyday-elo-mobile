@@ -1,6 +1,11 @@
 // Flat ESLint config for the Expo / React Native app.
 // Extends eslint-config-expo (React Native + TypeScript rules) and disables
 // any stylistic rules that would conflict with Prettier.
+//
+// eslint-config-expo is pinned to the ~10.0.x line, which is the release that
+// tracks Expo SDK 54 (this app's SDK). The SDK-numbered lines (55/56/57) bundle
+// eslint-plugin-react-hooks v7 and its experimental React Compiler rules, which
+// this app does not use. Bump this in lockstep with the Expo SDK, not ahead of it.
 const { defineConfig, globalIgnores } = require('eslint/config');
 const expoConfig = require('eslint-config-expo/flat');
 const eslintConfigPrettier = require('eslint-config-prettier/flat');
@@ -20,22 +25,14 @@ module.exports = defineConfig([
         'warn',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
+      // TODO: `@expo/vector-icons` resolves at runtime but eslint-plugin-import's
+      // resolver is not configured for this project's TS paths. Ignoring the one
+      // specifier is a stopgap; configure the TS resolver to drop it.
       'import/no-unresolved': ['error', { ignore: ['^@expo/vector-icons'] }],
-      // eslint-plugin-react-hooks v6 (bundled with eslint-config-expo) ships
-      // experimental React Compiler rules in its recommended preset. This app
-      // does not yet use the React Compiler, and these rules fire heavily on
-      // correct, idiomatic code (e.g. hoisted handlers referenced in effects,
-      // ref access patterns). Downgrade them to warnings so they surface as
-      // advisories without blocking CI. The classic, high-value hook rules
-      // (rules-of-hooks, exhaustive-deps) keep their default severity.
-      'react-hooks/refs': 'warn',
-      'react-hooks/immutability': 'warn',
-      'react-hooks/purity': 'warn',
-      'react-hooks/set-state-in-effect': 'warn',
-      'react-hooks/set-state-in-render': 'warn',
-      'react-hooks/static-components': 'warn',
-      'react-hooks/preserve-manual-memoization': 'warn',
-      'react-hooks/incompatible-library': 'warn',
+      // Issue #45: catch stray `console.log` left behind by debugging.
+      // `warn`/`error` are the app's deliberate diagnostic channels — 26 call
+      // sites report handled failures — so only those two are allowed.
+      'no-console': ['error', { allow: ['warn', 'error'] }],
     },
   },
   {

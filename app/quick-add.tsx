@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { 
   View, 
   Text, 
@@ -13,7 +13,7 @@ import {
 import { router, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../lib/auth-context';
-import { getUserLists, addListItem, getListItems, List, ListItem } from '../lib/api';
+import { getUserLists, addListItem, getListItems, List } from '../lib/api';
 import BulkAddModal from '../components/BulkAddModal';
 
 export default function QuickAddScreen() {

@@ -10,6 +10,7 @@ import {
   registerDeviceForUser,
   subscribeToNotificationTaps,
 } from '../lib/notifications';
+import { prunePartialRankings } from '../lib/partial-ranking';
 
 // Configure foreground handler once at module load — must be set before any
 // notification is received.
@@ -43,6 +44,10 @@ function useDeepLinkHandler() {
 
 function NotificationBridge() {
   const { user } = useAuth();
+  // Read the id out here so the registration effect closes over a primitive.
+  // Depending on `user` itself would re-register on every auth-context object
+  // identity change, not on an actual account switch.
+  const userId = user?.id;
 
   // Subscribe to notification taps for the lifetime of the app.
   useEffect(() => {
@@ -52,17 +57,25 @@ function NotificationBridge() {
 
   // Register this device for the signed-in user so the backend can target them.
   useEffect(() => {
-    if (!user) return;
-    registerDeviceForUser(user.id).catch(() => {
+    if (!userId) return;
+    registerDeviceForUser(userId).catch(() => {
       // Permission denied / simulator / offline — nothing user-facing to do.
     });
-  }, [user?.id]);
+  }, [userId]);
 
   return null;
 }
 
 export default function RootLayout() {
   useDeepLinkHandler();
+
+  // Sweep expired partial rankings once per launch so abandoned progress stops
+  // occupying keychain entries and offering stale resume prompts.
+  useEffect(() => {
+    prunePartialRankings().catch((error) => {
+      console.error('Failed to prune partial rankings:', error);
+    });
+  }, []);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

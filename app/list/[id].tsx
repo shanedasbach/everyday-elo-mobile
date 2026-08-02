@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { 
   View, 
   Text, 
@@ -16,6 +16,7 @@ import { useAuth } from '../../lib/auth-context';
 import ListActionSheet, { ActionItem } from '../../components/ListActionSheet';
 import AddItemModal from '../../components/AddItemModal';
 import BulkAddModal from '../../components/BulkAddModal';
+import FollowButton from '../../components/FollowButton';
 import {
   getList,
   getListByShareCode,
@@ -298,8 +299,13 @@ export default function ListDetailScreen() {
           {list.description && (
             <Text style={styles.listDescription}>{list.description}</Text>
           )}
-          
-          <Text style={styles.itemCount}>{items.length} items</Text>
+
+          <View style={styles.listMetaRow}>
+            <Text style={styles.itemCount}>{items.length} items</Text>
+            {user && !isOwner && list.creator_id && (
+              <FollowButton currentUserId={user.id} targetUserId={list.creator_id} />
+            )}
+          </View>
         </View>
 
         <View style={styles.itemsSection}>
@@ -314,7 +320,7 @@ export default function ListDetailScreen() {
             )}
           </View>
           
-          {items.map((item, index) => (
+          {items.map((item) => (
             <View key={item.id} style={styles.itemRow}>
               {rankingStatus === 'completed' && item.rank && (
                 <View style={[
@@ -476,6 +482,11 @@ const styles = StyleSheet.create({
   itemCount: {
     fontSize: 13,
     color: '#9CA3AF',
+  },
+  listMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   itemsSection: {
     backgroundColor: '#fff',

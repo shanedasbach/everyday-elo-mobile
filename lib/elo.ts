@@ -5,6 +5,8 @@
  * Higher K = faster rating changes (good for fewer comparisons)
  */
 
+import { selectNextPairIndices } from './pair-selection';
+
 export interface EloItem {
   id: string;
   name: string;
@@ -100,32 +102,34 @@ export function getRankedItems(items: EloItem[]): EloItem[] {
 }
 
 /**
- * Select next pair to compare
- * Strategy: Prioritize items with fewer comparisons, then similar ratings
+ * Build an order-independent key for a pair of items, so that
+ * pairKey(a, b) === pairKey(b, a).
  */
-export function selectNextPair(items: EloItem[]): [EloItem, EloItem] | null {
-  if (items.length < 2) return null;
+export function pairKey(idA: string, idB: string): string {
+  return idA < idB ? `${idA}::${idB}` : `${idB}::${idA}`;
+}
 
-  // Sort by comparisons (ascending) to prioritize less-compared items
-  const sorted = [...items].sort((a, b) => a.comparisons - b.comparisons);
-  
-  // Take the least compared item
-  const first = sorted[0];
-  
-  // Find an opponent with similar rating (for more informative comparisons)
-  const others = items.filter((item) => item.id !== first.id);
-  
-  // Sort others by rating distance from first
-  others.sort((a, b) => 
-    Math.abs(a.rating - first.rating) - Math.abs(b.rating - first.rating)
-  );
-  
-  // Pick randomly from top 3 closest (adds variety)
-  const candidates = others.slice(0, Math.min(3, others.length));
-  const second = candidates[Math.floor(Math.random() * candidates.length)];
+/**
+ * Select next pair to compare
+ * Strategy: Prioritize items with fewer comparisons, then similar ratings,
+ * while avoiding matchups the user has already been shown.
+ *
+ * `seenPairs` holds keys produced by `pairKey`. The least-compared item that
+ * still has an unseen opponent is chosen first; only when every possible
+ * matchup has been seen do we fall back to repeating one.
+ *
+ * The strategy itself lives in `lib/pair-selection.ts` — this is the
+ * item-returning view of it, and the rank screen uses the index-returning one.
+ */
+export function selectNextPair(
+  items: EloItem[],
+  seenPairs: ReadonlySet<string> = new Set()
+): [EloItem, EloItem] | null {
+  const pair = selectNextPairIndices(items, {
+    isSeen: (a, b) => seenPairs.has(pairKey(items[a].id, items[b].id)),
+  });
 
-  // Randomize order so there's no position bias
-  return Math.random() > 0.5 ? [first, second] : [second, first];
+  return pair && [items[pair[0]], items[pair[1]]];
 }
 
 /**
