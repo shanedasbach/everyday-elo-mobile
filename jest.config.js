@@ -28,6 +28,7 @@ module.exports = {
     'lib/templates.ts',
     'lib/partial-ranking.ts',
     'lib/swipe-gesture.ts',
+    'lib/follow-state.ts',
     'lib/notifications.ts',
     'lib/supabase-config.ts',
     'lib/pair-selection.ts',

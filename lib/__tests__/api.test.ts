@@ -53,6 +53,8 @@ import {
   deleteListItem,
   createRanking,
   getRanking,
+  getUserRankingForList,
+  getCompletedRankingForList,
   getRankedItems,
   updateRankedItem,
   incrementComparisonsCount,
@@ -61,6 +63,15 @@ import {
   recordComparison,
   getFeaturedLists,
   duplicateList,
+  followUser,
+  unfollowUser,
+  isFollowing,
+  getFollowing,
+  getFollowers,
+  getFollowingCount,
+  getFollowerCount,
+  getFollowedListsFeed,
+  FOLLOW_GRAPH_QUERY_CAP,
   NotAuthenticatedError,
   List,
   ListItem,
@@ -1888,6 +1899,481 @@ describe('API Module', () => {
       }));
 
       await expect(duplicateList('nonexistent')).rejects.toThrow('Source list not found');
+    });
+  });
+
+  // ============================================
+  // RANKING LOOKUPS (existing helpers)
+  // ============================================
+  describe('Ranking lookups', () => {
+    describe('getUserRankingForList', () => {
+      it('returns the ranking row when one exists', async () => {
+        const ranking = { id: 'r1', list_id: 'list-1', user_id: 'user-1', is_complete: false };
+        const single = jest.fn().mockResolvedValue({ data: ranking, error: null });
+        const eq2 = jest.fn().mockReturnValue({ single });
+        const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+        const select = jest.fn().mockReturnValue({ eq: eq1 });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        const result = await getUserRankingForList('list-1', 'user-1');
+
+        expect(eq1).toHaveBeenCalledWith('list_id', 'list-1');
+        expect(eq2).toHaveBeenCalledWith('user_id', 'user-1');
+        expect(result).toEqual(ranking);
+      });
+
+      it('returns null when no ranking exists', async () => {
+        const single = jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } });
+        const eq2 = jest.fn().mockReturnValue({ single });
+        const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+        const select = jest.fn().mockReturnValue({ eq: eq1 });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getUserRankingForList('list-1', 'user-1')).toBeNull();
+      });
+    });
+
+    describe('getCompletedRankingForList', () => {
+      it('returns the most recent completed ranking', async () => {
+        const ranking = { id: 'r1', list_id: 'list-1', is_complete: true };
+        const single = jest.fn().mockResolvedValue({ data: ranking, error: null });
+        const limit = jest.fn().mockReturnValue({ single });
+        const order = jest.fn().mockReturnValue({ limit });
+        const eq2 = jest.fn().mockReturnValue({ order });
+        const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+        const select = jest.fn().mockReturnValue({ eq: eq1 });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        const result = await getCompletedRankingForList('list-1');
+
+        expect(eq1).toHaveBeenCalledWith('list_id', 'list-1');
+        expect(eq2).toHaveBeenCalledWith('is_complete', true);
+        expect(order).toHaveBeenCalledWith('updated_at', { ascending: false });
+        expect(limit).toHaveBeenCalledWith(1);
+        expect(result).toEqual(ranking);
+      });
+
+      it('returns null when no completed ranking exists', async () => {
+        const single = jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } });
+        const limit = jest.fn().mockReturnValue({ single });
+        const order = jest.fn().mockReturnValue({ limit });
+        const eq2 = jest.fn().mockReturnValue({ order });
+        const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+        const select = jest.fn().mockReturnValue({ eq: eq1 });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getCompletedRankingForList('list-1')).toBeNull();
+      });
+    });
+  });
+
+  // ============================================
+  // SOCIAL: FOLLOWS
+  // ============================================
+  describe('Social Follows', () => {
+    describe('followUser', () => {
+      it('inserts a follow row', async () => {
+        const insert = jest.fn().mockResolvedValue({ error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ insert });
+
+        await followUser('user-a', 'user-b');
+
+        expect(mockSupabase.from).toHaveBeenCalledWith('follows');
+        expect(insert).toHaveBeenCalledWith({ follower_id: 'user-a', following_id: 'user-b' });
+      });
+
+      it('rejects self-follow', async () => {
+        await expect(followUser('user-a', 'user-a')).rejects.toThrow('Cannot follow yourself');
+        expect(mockSupabase.from).not.toHaveBeenCalled();
+      });
+
+      it('throws when supabase returns an error', async () => {
+        const insert = jest.fn().mockResolvedValue({ error: { message: 'rls violation' } });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ insert });
+
+        await expect(followUser('user-a', 'user-b')).rejects.toEqual({ message: 'rls violation' });
+      });
+    });
+
+    describe('unfollowUser', () => {
+      it('deletes the follow row by composite key', async () => {
+        const finalEq = jest.fn().mockResolvedValue({ error: null });
+        const firstEq = jest.fn().mockReturnValue({ eq: finalEq });
+        const del = jest.fn().mockReturnValue({ eq: firstEq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ delete: del });
+
+        await unfollowUser('user-a', 'user-b');
+
+        expect(mockSupabase.from).toHaveBeenCalledWith('follows');
+        expect(del).toHaveBeenCalled();
+        expect(firstEq).toHaveBeenCalledWith('follower_id', 'user-a');
+        expect(finalEq).toHaveBeenCalledWith('following_id', 'user-b');
+      });
+
+      it('throws when supabase returns an error', async () => {
+        const finalEq = jest.fn().mockResolvedValue({ error: { message: 'boom' } });
+        const firstEq = jest.fn().mockReturnValue({ eq: finalEq });
+        const del = jest.fn().mockReturnValue({ eq: firstEq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ delete: del });
+
+        await expect(unfollowUser('user-a', 'user-b')).rejects.toEqual({ message: 'boom' });
+      });
+    });
+
+    describe('isFollowing', () => {
+      it('returns true when the count is positive', async () => {
+        const finalEq = jest.fn().mockResolvedValue({ count: 1 });
+        const firstEq = jest.fn().mockReturnValue({ eq: finalEq });
+        const select = jest.fn().mockReturnValue({ eq: firstEq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        const result = await isFollowing('user-a', 'user-b');
+
+        expect(select).toHaveBeenCalledWith('*', { count: 'exact', head: true });
+        expect(firstEq).toHaveBeenCalledWith('follower_id', 'user-a');
+        expect(finalEq).toHaveBeenCalledWith('following_id', 'user-b');
+        expect(result).toBe(true);
+      });
+
+      it('returns false when the count is zero', async () => {
+        const finalEq = jest.fn().mockResolvedValue({ count: 0 });
+        const firstEq = jest.fn().mockReturnValue({ eq: finalEq });
+        const select = jest.fn().mockReturnValue({ eq: firstEq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await isFollowing('user-a', 'user-b')).toBe(false);
+      });
+
+      it('treats nullish count as not following', async () => {
+        const finalEq = jest.fn().mockResolvedValue({ count: null });
+        const firstEq = jest.fn().mockReturnValue({ eq: finalEq });
+        const select = jest.fn().mockReturnValue({ eq: firstEq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await isFollowing('user-a', 'user-b')).toBe(false);
+      });
+    });
+
+    describe('getFollowing / getFollowers', () => {
+      it('maps following rows to profiles', async () => {
+        const rows = [
+          { following_id: 'user-b', profiles: { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: null } },
+          { following_id: 'user-c', profiles: { id: 'user-c', name: null, username: null, avatar_url: 'a.png' } },
+        ];
+        const eq = jest.fn().mockResolvedValue({ data: rows, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        const result = await getFollowing('user-a');
+
+        expect(select).toHaveBeenCalledWith(
+          'following_id, profiles!follows_following_id_fkey(id, name, username, avatar_url)'
+        );
+        expect(eq).toHaveBeenCalledWith('follower_id', 'user-a');
+        expect(result).toEqual([
+          { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: undefined },
+          { id: 'user-c', name: '', username: undefined, avatar_url: 'a.png' },
+        ]);
+      });
+
+      it('drops following rows whose profile embed is null', async () => {
+        const rows = [
+          { following_id: 'user-b', profiles: null },
+          { following_id: 'user-c', profiles: { id: 'user-c', name: 'Cy', username: 'cy', avatar_url: null } },
+        ];
+        const eq = jest.fn().mockResolvedValue({ data: rows, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowing('user-a')).toEqual([
+          { id: 'user-c', name: 'Cy', username: 'cy', avatar_url: undefined },
+        ]);
+      });
+
+      it('drops follower rows whose profile embed is null', async () => {
+        const rows = [{ follower_id: 'user-b', profiles: null }];
+        const eq = jest.fn().mockResolvedValue({ data: rows, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowers('user-a')).toEqual([]);
+      });
+
+      it('returns empty when no follows exist', async () => {
+        const eq = jest.fn().mockResolvedValue({ data: null, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowing('user-a')).toEqual([]);
+      });
+
+      it('throws when getFollowing supabase errors', async () => {
+        const eq = jest.fn().mockResolvedValue({ data: null, error: { message: 'boom' } });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        await expect(getFollowing('user-a')).rejects.toEqual({ message: 'boom' });
+      });
+
+      it('maps follower rows to profiles', async () => {
+        const rows = [
+          { follower_id: 'user-b', profiles: { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: null } },
+        ];
+        const eq = jest.fn().mockResolvedValue({ data: rows, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        const result = await getFollowers('user-a');
+
+        expect(select).toHaveBeenCalledWith(
+          'follower_id, profiles!follows_follower_id_fkey(id, name, username, avatar_url)'
+        );
+        expect(eq).toHaveBeenCalledWith('following_id', 'user-a');
+        expect(result).toEqual([
+          { id: 'user-b', name: 'Bea', username: 'bea', avatar_url: undefined },
+        ]);
+      });
+
+      it('returns empty when no followers exist', async () => {
+        const eq = jest.fn().mockResolvedValue({ data: null, error: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowers('user-a')).toEqual([]);
+      });
+
+      it('throws when getFollowers supabase errors', async () => {
+        const eq = jest.fn().mockResolvedValue({ data: null, error: { message: 'boom' } });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        await expect(getFollowers('user-a')).rejects.toEqual({ message: 'boom' });
+      });
+    });
+
+    describe('getFollowingCount / getFollowerCount', () => {
+      it('returns the following count', async () => {
+        const eq = jest.fn().mockResolvedValue({ count: 5 });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowingCount('user-a')).toBe(5);
+        expect(eq).toHaveBeenCalledWith('follower_id', 'user-a');
+      });
+
+      it('returns 0 when the following count is nullish', async () => {
+        const eq = jest.fn().mockResolvedValue({ count: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowingCount('user-a')).toBe(0);
+      });
+
+      it('returns the follower count', async () => {
+        const eq = jest.fn().mockResolvedValue({ count: 3 });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowerCount('user-a')).toBe(3);
+        expect(eq).toHaveBeenCalledWith('following_id', 'user-a');
+      });
+
+      it('returns 0 when the follower count is nullish', async () => {
+        const eq = jest.fn().mockResolvedValue({ count: null });
+        const select = jest.fn().mockReturnValue({ eq });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        expect(await getFollowerCount('user-a')).toBe(0);
+      });
+    });
+
+    describe('getFollowedListsFeed', () => {
+      // The follow query is `select().eq().order().limit()`; these helpers keep
+      // the six tests below from re-declaring the same chain each time.
+      const followChain = (result: any) => {
+        const limitFn = jest.fn().mockResolvedValue(result);
+        const orderFn = jest.fn().mockReturnValue({ limit: limitFn });
+        const eqFn = jest.fn().mockReturnValue({ order: orderFn });
+        const selectFn = jest.fn().mockReturnValue({ eq: eqFn });
+        return { select: selectFn, eq: eqFn, order: orderFn, limit: limitFn };
+      };
+
+      const rankingsChainFor = (result: any) => {
+        const rangeFn = jest.fn().mockResolvedValue(result);
+        const orderFn = jest.fn().mockReturnValue({ range: rangeFn });
+        const chain: any = {
+          select: jest.fn(),
+          in: jest.fn(),
+          eq: jest.fn(),
+          order: orderFn,
+          rangeFn,
+        };
+        chain.select.mockReturnValue(chain);
+        chain.in.mockReturnValue(chain);
+        chain.eq.mockReturnValue(chain);
+        return chain;
+      };
+
+      const wireFrom = (follow: ReturnType<typeof followChain>, rankings: any) => {
+        let call = 0;
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          call++;
+          if (call === 1) {
+            expect(table).toBe('follows');
+            return { select: follow.select };
+          }
+          expect(table).toBe('rankings');
+          return rankings;
+        });
+      };
+
+      it('returns a zero follow count and no entries when the user follows nobody', async () => {
+        const follow = followChain({ data: [], error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
+
+        const result = await getFollowedListsFeed('user-a');
+
+        expect(result).toEqual({ following_count: 0, entries: [] });
+        expect(mockSupabase.from).toHaveBeenCalledTimes(1);
+        expect(mockSupabase.from).toHaveBeenCalledWith('follows');
+      });
+
+      it('returns empty when follow query returns null', async () => {
+        const follow = followChain({ data: null, error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
+
+        expect(await getFollowedListsFeed('user-a')).toEqual({
+          following_count: 0,
+          entries: [],
+        });
+      });
+
+      it('caps the follow graph and takes the most recent follows', async () => {
+        const follow = followChain({ data: [], error: null });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
+
+        await getFollowedListsFeed('user-a');
+
+        expect(follow.eq).toHaveBeenCalledWith('follower_id', 'user-a');
+        expect(follow.order).toHaveBeenCalledWith('created_at', { ascending: false });
+        expect(follow.limit).toHaveBeenCalledWith(FOLLOW_GRAPH_QUERY_CAP);
+      });
+
+      it('throws when the follow query errors', async () => {
+        const follow = followChain({ data: null, error: { message: 'boom' } });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select: follow.select });
+
+        await expect(getFollowedListsFeed('user-a')).rejects.toEqual({ message: 'boom' });
+      });
+
+      it('maps ranking rows to feed entries attributed to the ranker', async () => {
+        const follow = followChain({
+          data: [{ following_id: 'user-b' }, { following_id: 'user-c' }],
+          error: null,
+        });
+        // list-1 was created by user-z but ranked by the followed user Bea —
+        // the case that made the old `creator_*` naming misattribute the card.
+        const rankings = rankingsChainFor({
+          data: [
+            {
+              id: 'r1',
+              list_id: 'list-1',
+              user_id: 'user-b',
+              comparisons_count: 12,
+              updated_at: '2026-05-23T10:00:00Z',
+              lists: { id: 'list-1', title: 'Pizza', description: 'Toppings' },
+              profiles: { id: 'user-b', name: 'Bea', username: 'bea' },
+            },
+            {
+              id: 'r2',
+              list_id: 'list-2',
+              user_id: 'user-c',
+              comparisons_count: null,
+              updated_at: '2026-05-22T10:00:00Z',
+              lists: { id: 'list-2', title: 'Cars', description: null },
+              profiles: null,
+            },
+          ],
+          error: null,
+        });
+        wireFrom(follow, rankings);
+
+        const result = await getFollowedListsFeed('user-a', 5, 10);
+
+        expect(rankings.in).toHaveBeenCalledWith('user_id', ['user-b', 'user-c']);
+        expect(rankings.eq).toHaveBeenCalledWith('is_complete', true);
+        expect(rankings.eq).toHaveBeenCalledWith('lists.is_private', false);
+        expect(rankings.eq).toHaveBeenCalledWith('lists.is_template', false);
+        expect(rankings.order).toHaveBeenCalledWith('updated_at', { ascending: false });
+        expect(rankings.rangeFn).toHaveBeenCalledWith(10, 14);
+
+        expect(result).toEqual({
+          following_count: 2,
+          entries: [
+            {
+              ranking_id: 'r1',
+              list_id: 'list-1',
+              title: 'Pizza',
+              description: 'Toppings',
+              ranker_id: 'user-b',
+              ranker_name: 'Bea',
+              ranker_username: 'bea',
+              updated_at: '2026-05-23T10:00:00Z',
+              comparisons_count: 12,
+            },
+            {
+              ranking_id: 'r2',
+              list_id: 'list-2',
+              title: 'Cars',
+              description: undefined,
+              ranker_id: '',
+              ranker_name: undefined,
+              ranker_username: undefined,
+              updated_at: '2026-05-22T10:00:00Z',
+              comparisons_count: 0,
+            },
+          ],
+        });
+      });
+
+      it('reports a non-zero follow count when followed users have no rankings', async () => {
+        // The state that used to render "No one to follow yet": the user does
+        // follow people, none of whom have completed a public ranking.
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        wireFrom(follow, rankingsChainFor({ data: [], error: null }));
+
+        expect(await getFollowedListsFeed('user-a')).toEqual({
+          following_count: 1,
+          entries: [],
+        });
+      });
+
+      it('uses default limit and offset', async () => {
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        const rankings = rankingsChainFor({ data: [], error: null });
+        wireFrom(follow, rankings);
+
+        await getFollowedListsFeed('user-a');
+
+        expect(rankings.rangeFn).toHaveBeenCalledWith(0, 19);
+      });
+
+      it('handles null ranking response gracefully', async () => {
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        wireFrom(follow, rankingsChainFor({ data: null, error: null }));
+
+        expect(await getFollowedListsFeed('user-a')).toEqual({
+          following_count: 1,
+          entries: [],
+        });
+      });
+
+      it('throws when the rankings query errors', async () => {
+        const follow = followChain({ data: [{ following_id: 'user-b' }], error: null });
+        wireFrom(follow, rankingsChainFor({ data: null, error: { message: 'boom' } }));
+
+        await expect(getFollowedListsFeed('user-a')).rejects.toEqual({ message: 'boom' });
+      });
     });
   });
 });
