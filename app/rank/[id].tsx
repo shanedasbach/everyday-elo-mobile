@@ -9,6 +9,7 @@ import {
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { expectedScore, K_FACTOR, pairKey } from '../../lib/elo';
+import { selectNextPairIndices } from '../../lib/pair-selection';
 import {
   SWIPE_THRESHOLD,
   commitTranslation,
@@ -193,56 +194,13 @@ export default function RankScreen() {
   };
 
   const selectNextPair = (items: LocalRankedItem[], skipObvious: boolean = false) => {
-    if (items.length < 2) return;
+    const pair = selectNextPairIndices(items, {
+      isSeen: (a, b) => seenPairs.current.has(pairKey(items[a].itemId, items[b].itemId)),
+      skipObvious,
+    });
 
-    // Sort by comparisons (prioritize less-compared items)
-    const sorted = [...items].map((item, index) => ({ ...item, originalIndex: index }))
-      .sort((a, b) => a.comparisons - b.comparisons);
-
-    type Indexed = (typeof sorted)[number];
-
-    // Opponents of `item`, closest rating first.
-    const opponentsOf = (item: Indexed): Indexed[] =>
-      sorted
-        .filter(o => o.originalIndex !== item.originalIndex)
-        .sort((a, b) =>
-          Math.abs(a.rating - item.rating) - Math.abs(b.rating - item.rating)
-        );
-
-    // Walk out from the least-compared item until we find one that still has a
-    // matchup the user hasn't seen. Avoiding repeats is a hard constraint;
-    // express mode is a soft preference applied within the unseen pool.
-    let first = sorted[0];
-    let others = opponentsOf(first);
-
-    for (const candidate of sorted) {
-      const unseen = opponentsOf(candidate).filter(
-        o => !seenPairs.current.has(pairKey(candidate.itemId, o.itemId))
-      );
-      if (unseen.length > 0) {
-        first = candidate;
-        others = unseen;
-        break;
-      }
-    }
-
-    // Express mode: filter out very lopsided matchups (rating diff > 200)
-    if (skipObvious && others.length > 1) {
-      const closeOthers = others.filter(o => Math.abs(o.rating - first.rating) < 200);
-      if (closeOthers.length > 0) {
-        others = closeOthers;
-      }
-    }
-
-    // Pick from top 3 closest
-    const candidates = others.slice(0, Math.min(3, others.length));
-    const second = candidates[Math.floor(Math.random() * candidates.length)];
-
-    // Randomize order
-    if (Math.random() > 0.5) {
-      setCurrentPair([first.originalIndex, second.originalIndex]);
-    } else {
-      setCurrentPair([second.originalIndex, first.originalIndex]);
+    if (pair) {
+      setCurrentPair(pair);
     }
   };
 

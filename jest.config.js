@@ -14,7 +14,12 @@ module.exports = {
     }],
   },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
-  testMatch: ['**/lib/__tests__/**/*.test.ts'],
+  // Any __tests__ directory in the repo, .ts or .tsx — so tests can live
+  // alongside app/ and components/ code, not just lib/.
+  testMatch: ['**/__tests__/**/*.test.ts?(x)'],
+  // Worktrees hold full copies of the tree; without this they present as
+  // duplicate suites and Haste collisions.
+  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/worktrees/'],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   collectCoverageFrom: [
     'lib/elo.ts',
@@ -25,6 +30,7 @@ module.exports = {
     'lib/swipe-gesture.ts',
     'lib/notifications.ts',
     'lib/supabase-config.ts',
+    'lib/pair-selection.ts',
   ],
   coverageThreshold: {
     global: {
