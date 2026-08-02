@@ -62,6 +62,7 @@ import {
   markRankingCompleteAndNotify,
   recordComparison,
   persistComparison,
+  ComparisonWriteError,
   getFeaturedLists,
   duplicateList,
   followUser,
@@ -1127,64 +1128,81 @@ describe('API Module', () => {
   describe('Persisting a full comparison', () => {
     const args = {
       rankingId: 'ranking-1',
-      winnerRankedItemId: 'ri-winner',
-      winnerItemId: 'item-winner',
-      winnerRating: 1520,
-      winnerComparisons: 3,
-      loserRankedItemId: 'ri-loser',
-      loserItemId: 'item-loser',
-      loserRating: 1480,
-      loserComparisons: 2,
+      winner: {
+        rankedItemId: 'ri-winner',
+        itemId: 'item-winner',
+        rating: 1520,
+        comparisons: 3,
+      },
+      loser: {
+        rankedItemId: 'ri-loser',
+        itemId: 'item-loser',
+        rating: 1480,
+        comparisons: 2,
+      },
     };
 
+    // incrementComparisonsCount goes through the increment_comparisons_count
+    // RPC, not a rankings table read-then-update — so `rankings` is never
+    // reached via from() and the mock throws if anything tries.
     const buildTableMocks = () => {
       const rankedItemsChain = {
         update: jest.fn().mockReturnThis(),
         eq: jest.fn().mockResolvedValue({ error: null }),
-      };
-      const rankingsChain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: { comparisons_count: 5 } }),
       };
       const comparisonsChain = {
         insert: jest.fn().mockResolvedValue({ error: null }),
       };
       (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
         if (table === 'ranked_items') return rankedItemsChain;
-        if (table === 'rankings') return rankingsChain;
         if (table === 'comparisons') return comparisonsChain;
         throw new Error(`Unexpected table: ${table}`);
       });
-      return { rankedItemsChain, rankingsChain, comparisonsChain };
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
+      return { rankedItemsChain, comparisonsChain };
+    };
+
+    // Runs persistComparison and returns the ComparisonWriteError it threw,
+    // failing loudly if it unexpectedly resolved.
+    const captureFailure = async (): Promise<ComparisonWriteError> => {
+      try {
+        await persistComparison(args);
+      } catch (error) {
+        return error as ComparisonWriteError;
+      }
+      throw new Error('expected persistComparison to reject, but it resolved');
     };
 
     it('invokes all four underlying writes per comparison', async () => {
-      const { rankedItemsChain, rankingsChain, comparisonsChain } = buildTableMocks();
+      const { rankedItemsChain, comparisonsChain } = buildTableMocks();
 
       await persistComparison(args);
 
       // Two updateRankedItem calls — one per item
       expect(rankedItemsChain.update).toHaveBeenCalledTimes(2);
       expect(rankedItemsChain.update).toHaveBeenCalledWith({
-        rating: args.winnerRating,
-        comparisons: args.winnerComparisons,
+        rating: args.winner.rating,
+        comparisons: args.winner.comparisons,
       });
       expect(rankedItemsChain.update).toHaveBeenCalledWith({
-        rating: args.loserRating,
-        comparisons: args.loserComparisons,
+        rating: args.loser.rating,
+        comparisons: args.loser.comparisons,
       });
+      expect(rankedItemsChain.eq).toHaveBeenCalledWith('id', args.winner.rankedItemId);
+      expect(rankedItemsChain.eq).toHaveBeenCalledWith('id', args.loser.rankedItemId);
 
-      // incrementComparisonsCount touched rankings
-      expect(rankingsChain.update).toHaveBeenCalled();
+      // incrementComparisonsCount went through the atomic RPC
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
+      expect(mockSupabase.rpc).toHaveBeenCalledWith('increment_comparisons_count', {
+        p_ranking_id: args.rankingId,
+      });
 
       // recordComparison inserted into comparisons with winner == winner.itemId
       expect(comparisonsChain.insert).toHaveBeenCalledWith({
         ranking_id: args.rankingId,
-        item_a_id: args.winnerItemId,
-        item_b_id: args.loserItemId,
-        winner_id: args.winnerItemId,
+        item_a_id: args.winner.itemId,
+        item_b_id: args.loser.itemId,
+        winner_id: args.winner.itemId,
       });
     });
 
@@ -1207,15 +1225,6 @@ describe('API Module', () => {
           return gate;
         }),
       };
-      const rankingsChain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockImplementation(() => {
-          dispatchOrder.push('rankings.select.single');
-          return Promise.resolve({ data: { comparisons_count: 5 } });
-        }),
-      };
       const comparisonsChain = {
         insert: jest.fn().mockImplementation(() => {
           dispatchOrder.push('comparisons.insert');
@@ -1224,9 +1233,12 @@ describe('API Module', () => {
       };
       (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
         if (table === 'ranked_items') return rankedItemsChain;
-        if (table === 'rankings') return rankingsChain;
         if (table === 'comparisons') return comparisonsChain;
         throw new Error(`Unexpected table: ${table}`);
+      });
+      (mockSupabase.rpc as jest.Mock).mockImplementation(() => {
+        dispatchOrder.push('rpc.increment_comparisons_count');
+        return gate;
       });
 
       const pending = persistComparison(args);
@@ -1234,13 +1246,13 @@ describe('API Module', () => {
       // Drain microtasks so all parallel dispatches land before we release the gate.
       await new Promise(setImmediate);
 
-      // Both updateRankedItem dispatches + recordComparison dispatch fired
-      // before any await resolved — they would not all be present here under
-      // sequential awaits.
+      // All four dispatches fired before any await resolved — they would not
+      // all be present here under sequential awaits.
       expect(dispatchOrder).toEqual(
         expect.arrayContaining([
           'ranked_items.update',
           'ranked_items.update',
+          'rpc.increment_comparisons_count',
           'comparisons.insert',
         ])
       );
@@ -1250,28 +1262,97 @@ describe('API Module', () => {
       await pending;
     });
 
-    it('rejects if any underlying write fails', async () => {
+    it('rejects with the failing write named when one underlying write fails', async () => {
       const rankedItemsChain = {
         update: jest.fn().mockReturnThis(),
         eq: jest.fn().mockResolvedValue({ error: null }),
-      };
-      const rankingsChain = {
-        select: jest.fn().mockReturnThis(),
-        update: jest.fn().mockReturnThis(),
-        eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: { comparisons_count: 5 } }),
       };
       const comparisonsChain = {
         insert: jest.fn().mockResolvedValue({ error: { message: 'insert failed' } }),
       };
       (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
         if (table === 'ranked_items') return rankedItemsChain;
-        if (table === 'rankings') return rankingsChain;
         if (table === 'comparisons') return comparisonsChain;
         throw new Error(`Unexpected table: ${table}`);
       });
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
-      await expect(persistComparison(args)).rejects.toEqual({ message: 'insert failed' });
+      await expect(persistComparison(args)).rejects.toThrow(ComparisonWriteError);
+
+      const error = await captureFailure();
+      expect(error.failedWrites).toEqual(['comparison record']);
+      expect(error.errors).toEqual([{ message: 'insert failed' }]);
+    });
+
+    it('reports every failure when more than one write fails', async () => {
+      // Promise.all would reject on the first failure and leave the second
+      // rejection unhandled — React Native logs that as "Possible Unhandled
+      // Promise Rejection" and the caller's catch never sees it.
+      const rankedItemsChain = {
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockResolvedValue({ error: { message: 'ranked_items denied' } }),
+      };
+      const comparisonsChain = {
+        insert: jest.fn().mockResolvedValue({ error: { message: 'insert failed' } }),
+      };
+      (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+        if (table === 'ranked_items') return rankedItemsChain;
+        if (table === 'comparisons') return comparisonsChain;
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
+
+      const error = await captureFailure();
+
+      // Both updateRankedItem writes failed plus the comparison insert — three
+      // of four, all collected rather than only the first.
+      expect(error.failedWrites).toEqual(['winner rating', 'loser rating', 'comparison record']);
+      expect(error.errors).toEqual([
+        { message: 'ranked_items denied' },
+        { message: 'ranked_items denied' },
+        { message: 'insert failed' },
+      ]);
+      expect(error.message).toBe(
+        'Failed to persist comparison: winner rating, loser rating, comparison record'
+      );
+    });
+
+    it('does not leave sibling rejections unhandled', async () => {
+      // Guards the same property from the runtime side: with Promise.all the
+      // second and third rejections have no handler by the time the first one
+      // propagates, which surfaces as an unhandledRejection.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+
+      try {
+        const rankedItemsChain = {
+          update: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ error: { message: 'ranked_items denied' } }),
+        };
+        const comparisonsChain = {
+          insert: jest.fn().mockResolvedValue({ error: { message: 'insert failed' } }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'ranked_items') return rankedItemsChain;
+          if (table === 'comparisons') return comparisonsChain;
+          throw new Error(`Unexpected table: ${table}`);
+        });
+        (mockSupabase.rpc as jest.Mock).mockResolvedValue({
+          data: null,
+          error: { message: 'RLS denied' },
+        });
+
+        await expect(persistComparison(args)).rejects.toThrow(ComparisonWriteError);
+
+        // Let the event loop reach the point where an orphaned rejection would fire.
+        await new Promise(setImmediate);
+        await new Promise(setImmediate);
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
     });
   });
 

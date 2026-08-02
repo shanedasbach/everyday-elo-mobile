@@ -239,14 +239,18 @@ export default function RankScreen() {
       try {
         await persistComparison({
           rankingId,
-          winnerRankedItemId: winner.id,
-          winnerItemId: winner.itemId,
-          winnerRating: newWinnerRating,
-          winnerComparisons: winner.comparisons + 1,
-          loserRankedItemId: loser.id,
-          loserItemId: loser.itemId,
-          loserRating: newLoserRating,
-          loserComparisons: loser.comparisons + 1,
+          winner: {
+            rankedItemId: winner.id,
+            itemId: winner.itemId,
+            rating: newWinnerRating,
+            comparisons: winner.comparisons + 1,
+          },
+          loser: {
+            rankedItemId: loser.id,
+            itemId: loser.itemId,
+            rating: newLoserRating,
+            comparisons: loser.comparisons + 1,
+          },
         });
       } catch (error) {
         console.error('Failed to save comparison:', error);
