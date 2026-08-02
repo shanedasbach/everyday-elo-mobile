@@ -25,11 +25,12 @@ npm test:coverage    # Coverage report (95% threshold globally)
 - Jest with jest-expo and ts-jest transform
 - 95% coverage threshold on branches, functions, lines, and statements
 - Currently 100% coverage on lib modules (104 tests)
-- Test pattern: `lib/__tests__/**/*.test.ts`
+- Test pattern: `**/__tests__/**/*.test.ts(x)` — any `__tests__` directory, including `app/` and `components/`
 
 ## Key Files
 - `lib/api.ts` — Supabase API client for all data operations
 - `lib/elo.ts` — Elo rating algorithm (shared with web)
+- `lib/pair-selection.ts` — next-pair strategy, shared by `selectNextPair` and the rank screen
 - `lib/auth-context.tsx` — Auth state management with SecureStore
 - `lib/supabase.ts` — Supabase client configuration
 - `lib/templates.ts` — Template data

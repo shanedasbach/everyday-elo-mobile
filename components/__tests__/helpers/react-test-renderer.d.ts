@@ -20,7 +20,11 @@ declare module 'react-test-renderer' {
     toJSON(): unknown;
   }
 
-  export function act(callback: () => void | Promise<void>): void;
+  // The real `act` returns a thenable, so `await act(async () => …)` awaits the
+  // flush. Typing the return as plain `void` would make that await a no-op at
+  // the type level and hide un-flushed updates.
+  export function act(callback: () => Promise<void>): PromiseLike<void>;
+  export function act(callback: () => void): void;
   export function create(element: ReactElement): ReactTestRenderer;
 
   const TestRenderer: {

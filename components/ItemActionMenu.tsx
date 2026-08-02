@@ -49,6 +49,10 @@ export default function ItemActionMenu({
               onPress={() => canBoost && handleAction('boost')}
               disabled={!canBoost}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Boost ${itemName} to top`}
+              accessibilityHint="Moves this item to the number one position"
+              accessibilityState={{ disabled: !canBoost }}
             >
               <Text style={styles.actionIcon}>🚀</Text>
               <View style={styles.actionTextContainer}>
@@ -64,6 +68,10 @@ export default function ItemActionMenu({
               onPress={() => canDemote && handleAction('demote')}
               disabled={!canDemote}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Send ${itemName} to bottom`}
+              accessibilityHint="Moves this item to the last position"
+              accessibilityState={{ disabled: !canDemote }}
             >
               <Text style={styles.actionIcon}>👇</Text>
               <View style={styles.actionTextContainer}>
@@ -78,6 +86,9 @@ export default function ItemActionMenu({
               style={styles.actionButton}
               onPress={() => handleAction('remove')}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${itemName}`}
+              accessibilityHint="Deletes this item from the list"
             >
               <Text style={styles.actionIcon}>🗑️</Text>
               <View style={styles.actionTextContainer}>
@@ -89,7 +100,12 @@ export default function ItemActionMenu({
             </TouchableOpacity>
           </View>
           
-          <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
+          <TouchableOpacity
+            style={styles.cancelButton}
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel"
+          >
             <Text style={styles.cancelLabel}>Cancel</Text>
           </TouchableOpacity>
         </Pressable>

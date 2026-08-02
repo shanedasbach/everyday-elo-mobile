@@ -1,9 +1,9 @@
 // Shared render/query helpers built on react-test-renderer.
 //
-// We deliberately avoid @testing-library/react-native here: it imports the real
-// `react-native` internals for host-component config, which cannot load under
-// this repo's `node` test environment. react-test-renderer plus the rnMock
-// host stubs gives us the same querying power with zero native dependencies.
+// Both off-the-shelf options were tried and neither runs on this repo's
+// Jest 30 / Expo SDK 54 stack; `README.md` in this directory records the exact
+// failures and how to re-check them. react-test-renderer plus the rnMock host
+// stubs gives us the same querying power with zero native dependencies.
 import type { ComponentType, ReactElement } from 'react';
 import TestRenderer, {
   act,
@@ -43,7 +43,12 @@ export function findByText(
 }
 
 // Invoke a host element's onPress inside act(), passing an optional event.
+//
+// A disabled touchable swallows the press in real RN, so this does too.
+// Without it `disabled` is an inert attribute and no behavioural assertion can
+// tell a correctly-disabled control apart from a live one.
 export function press(node: TestInstance, event?: unknown): void {
+  if (node.props.disabled === true) return;
   act(() => {
     (node.props.onPress as (e?: unknown) => void)(event);
   });
@@ -53,5 +58,18 @@ export function press(node: TestInstance, event?: unknown): void {
 export function changeText(node: TestInstance, value: string): void {
   act(() => {
     (node.props.onChangeText as (v: string) => void)(value);
+  });
+}
+
+// Invoke any other prop callback (onSubmitEditing, onRequestClose, …) inside
+// act(). Calling these directly off `node.props` schedules a state update
+// outside act and React warns; route them through here instead.
+export function invoke(
+  node: TestInstance,
+  prop: string,
+  ...args: unknown[]
+): void {
+  act(() => {
+    (node.props[prop] as (...a: unknown[]) => void)(...args);
   });
 }

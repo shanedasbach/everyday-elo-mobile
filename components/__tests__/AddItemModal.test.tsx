@@ -4,7 +4,7 @@ import * as Haptics from 'expo-haptics';
 jest.mock('react-native', () => require('./helpers/rnMock'));
 
 import * as RN from './helpers/rnMock';
-import { renderComponent, findByText, press, changeText } from './helpers/render';
+import { renderComponent, findByText, press, changeText, invoke } from './helpers/render';
 import AddItemModal from '../AddItemModal';
 
 function setup(overrides: Partial<React.ComponentProps<typeof AddItemModal>> = {}) {
@@ -82,7 +82,7 @@ describe('AddItemModal', () => {
   it('adds via the keyboard submit handler', () => {
     const { root, onAdd } = setup();
     changeText(input(root), 'Sushi');
-    (input(root).props.onSubmitEditing as () => void)();
+    invoke(input(root), 'onSubmitEditing');
     expect(onAdd).toHaveBeenCalledWith('Sushi');
   });
 
@@ -91,6 +91,13 @@ describe('AddItemModal', () => {
     const { root } = setup();
     const kav = root.findAllByType(RN.KeyboardAvoidingView)[0];
     expect(kav.props.behavior).toBe('height');
+  });
+
+  it('renders no content while hidden', () => {
+    const { root } = setup({ visible: false });
+    expect(root.findByType(RN.Modal).props.visible).toBe(false);
+    expect(root.findAllByType(RN.TextInput)).toHaveLength(0);
+    expect(root.findAllByType(RN.TouchableOpacity)).toHaveLength(0);
   });
 });
 

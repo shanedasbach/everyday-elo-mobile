@@ -44,9 +44,14 @@ export default function CreateScreen() {
 
     setLoading(true);
     try {
-      // Create the list
-      const list = await createList({ title: title.trim() });
-      
+      // Create the list. Signed-out users can still rank ad hoc, and that
+      // list is knowingly unowned. When we do think someone is signed in,
+      // require a valid session so an expired token can't quietly orphan it.
+      const list = await createList({
+        title: title.trim(),
+        allowAnonymous: !user,
+      });
+
       // Add items
       await addListItems(list.id, items);
       

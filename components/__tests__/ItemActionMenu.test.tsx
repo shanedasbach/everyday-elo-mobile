@@ -90,4 +90,11 @@ describe('ItemActionMenu', () => {
     press(findByText(root, RN.TouchableOpacity, 'Cancel'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('renders no content while hidden', () => {
+    const { root } = setup({ visible: false });
+    expect(root.findByType(RN.Modal).props.visible).toBe(false);
+    expect(root.findAllByType(RN.TouchableOpacity)).toHaveLength(0);
+    expect(root.findAllByType(RN.Pressable)).toHaveLength(0);
+  });
 });

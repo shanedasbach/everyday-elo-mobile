@@ -100,4 +100,35 @@ describe('BulkAddModal', () => {
     const { root } = setup();
     expect(root.findAllByType(RN.KeyboardAvoidingView)[0].props.behavior).toBe('height');
   });
+
+  it('accepts a large pasted list in one edit', () => {
+    const { root, onAdd } = setup({ existingItems: ['Item 7'] });
+    // A paste arrives as a single onChangeText carrying the whole blob, not as
+    // per-character edits — so the parse, the dedup scan and the count label
+    // all have to hold for a payload this size in one pass.
+    const pasted = Array.from({ length: 200 }, (_, i) => `Item ${i}`).join('\n');
+
+    changeText(textarea(root), pasted);
+    expect(findByText(root, RN.TouchableOpacity, 'Add (200)')).toBeTruthy();
+
+    // 'Item 7' collides with the existing list, so the whole paste is refused.
+    press(findByText(root, RN.TouchableOpacity, 'Add'));
+    expect(errorText(root)).toBe('Already exists: Item 7');
+    expect(onAdd).not.toHaveBeenCalled();
+
+    // Drop the collision and the same payload goes through intact.
+    changeText(textarea(root), pasted.replace('Item 7\n', ''));
+    press(findByText(root, RN.TouchableOpacity, 'Add'));
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd.mock.calls[0][0]).toHaveLength(199);
+    expect(onAdd.mock.calls[0][0][0]).toBe('Item 0');
+    expect(onAdd.mock.calls[0][0][198]).toBe('Item 199');
+  });
+
+  it('renders no content while hidden', () => {
+    const { root } = setup({ visible: false });
+    expect(root.findByType(RN.Modal).props.visible).toBe(false);
+    expect(root.findAllByType(RN.TextInput)).toHaveLength(0);
+    expect(root.findAllByType(RN.TouchableOpacity)).toHaveLength(0);
+  });
 });
