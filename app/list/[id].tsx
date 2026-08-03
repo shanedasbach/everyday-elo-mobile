@@ -22,13 +22,13 @@ import {
   getListByShareCode,
   getListItems,
   getRankedItems,
+  getUserRankingForList,
   deleteList,
   addListItem,
   duplicateList,
   List,
   ListItem,
 } from '../../lib/api';
-import { supabase } from '../../lib/supabase';
 
 interface RankedListItem extends ListItem {
   rating?: number;
@@ -71,12 +71,7 @@ export default function ListDetailScreen() {
       
       // Check if user has ranked this list
       if (user) {
-        const { data: ranking } = await supabase
-          .from('rankings')
-          .select('*')
-          .eq('list_id', listData.id)
-          .eq('user_id', user.id)
-          .single();
+        const ranking = await getUserRankingForList(listData.id, user.id);
 
         if (ranking) {
           setRankingStatus(ranking.is_complete ? 'completed' : 'in_progress');
