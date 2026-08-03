@@ -651,6 +651,77 @@ export async function recordComparison(
   if (error) throw error;
 }
 
+// One side of a comparison. Grouping the four fields per side keeps
+// rankedItemId (a ranked_items row) and itemId (a list_items row) from being
+// transposable at the call site — they are both strings, and swapping them
+// would silently update the wrong row and record the wrong winner.
+export interface ComparisonSide {
+  rankedItemId: string;
+  itemId: string;
+  rating: number;
+  comparisons: number;
+}
+
+export interface PersistComparisonArgs {
+  rankingId: string;
+  winner: ComparisonSide;
+  loser: ComparisonSide;
+}
+
+// Thrown when one or more of persistComparison's four writes fails. Carries
+// every rejection, not just the first, so the call site's console.error names
+// which parts of the comparison did not land.
+export class ComparisonWriteError extends Error {
+  readonly failedWrites: string[];
+  readonly errors: unknown[];
+
+  constructor(failures: { write: string; reason: unknown }[]) {
+    super(`Failed to persist comparison: ${failures.map(f => f.write).join(', ')}`);
+    this.name = 'ComparisonWriteError';
+    this.failedWrites = failures.map(f => f.write);
+    this.errors = failures.map(f => f.reason);
+  }
+}
+
+// Persist all four writes for a single comparison in parallel. Each write
+// targets a different row or table, so there is no ordering dependency —
+// running them sequentially (as the call site used to) stacked ~4x the
+// background latency on the hot path.
+export async function persistComparison(args: PersistComparisonArgs): Promise<void> {
+  const writes = [
+    {
+      write: 'winner rating',
+      run: () => updateRankedItem(args.winner.rankedItemId, args.winner.rating, args.winner.comparisons),
+    },
+    {
+      write: 'loser rating',
+      run: () => updateRankedItem(args.loser.rankedItemId, args.loser.rating, args.loser.comparisons),
+    },
+    {
+      write: 'comparisons count',
+      run: () => incrementComparisonsCount(args.rankingId),
+    },
+    {
+      write: 'comparison record',
+      run: () => recordComparison(args.rankingId, args.winner.itemId, args.loser.itemId, args.winner.itemId),
+    },
+  ];
+
+  // allSettled, not all: Promise.all rejects on the first failure and leaves
+  // the siblings' rejections unhandled, which React Native reports as
+  // "Possible Unhandled Promise Rejection" — noise the caller's catch cannot
+  // suppress, and it hides every failure after the first. Because these run in
+  // parallel any subset can land, so the caller needs the full list to know
+  // what state the ranking is actually in.
+  const results = await Promise.allSettled(writes.map(w => w.run()));
+
+  const failures = results.flatMap((result, i) =>
+    result.status === 'rejected' ? [{ write: writes[i].write, reason: result.reason }] : []
+  );
+
+  if (failures.length > 0) throw new ComparisonWriteError(failures);
+}
+
 // ============================================
 // DUPLICATE LIST
 // ============================================
