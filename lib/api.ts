@@ -668,58 +668,73 @@ export interface PersistComparisonArgs {
   loser: ComparisonSide;
 }
 
-// Thrown when one or more of persistComparison's four writes fails. Carries
-// every rejection, not just the first, so the call site's console.error names
-// which parts of the comparison did not land.
-export class ComparisonWriteError extends Error {
-  readonly failedWrites: string[];
-  readonly errors: unknown[];
+// Applies both ranked_items updates, the comparisons_count increment, and
+// the comparisons insert in a single database transaction — see
+// supabase/migrations/20260805000000_atomic_record_comparison.sql. A partial
+// failure can no longer leave ranked_items desynced from the comparisons
+// audit log, because there is exactly one round-trip: either the server
+// commits all four writes or none of them land.
+//
+// `winner`/`loser` are optional so this also serves persistSkippedComparison
+// below, which has no rating change to make.
+async function recordComparisonAtomic(args: {
+  rankingId: string;
+  itemAId: string;
+  itemBId: string;
+  winnerItemId: string | null;
+  winner: { rankedItemId: string; rating: number; comparisons: number } | null;
+  loser: { rankedItemId: string; rating: number; comparisons: number } | null;
+}): Promise<void> {
+  const { error } = await supabase.rpc('record_comparison', {
+    p_ranking_id: args.rankingId,
+    p_item_a_id: args.itemAId,
+    p_item_b_id: args.itemBId,
+    p_winner_item_id: args.winnerItemId,
+    p_winner_ranked_item_id: args.winner?.rankedItemId ?? null,
+    p_winner_rating: args.winner?.rating ?? null,
+    p_winner_comparisons: args.winner?.comparisons ?? null,
+    p_loser_ranked_item_id: args.loser?.rankedItemId ?? null,
+    p_loser_rating: args.loser?.rating ?? null,
+    p_loser_comparisons: args.loser?.comparisons ?? null,
+  });
 
-  constructor(failures: { write: string; reason: unknown }[]) {
-    super(`Failed to persist comparison: ${failures.map(f => f.write).join(', ')}`);
-    this.name = 'ComparisonWriteError';
-    this.failedWrites = failures.map(f => f.write);
-    this.errors = failures.map(f => f.reason);
-  }
+  if (error) throw error;
 }
 
-// Persist all four writes for a single comparison in parallel. Each write
-// targets a different row or table, so there is no ordering dependency —
-// running them sequentially (as the call site used to) stacked ~4x the
-// background latency on the hot path.
 export async function persistComparison(args: PersistComparisonArgs): Promise<void> {
-  const writes = [
-    {
-      write: 'winner rating',
-      run: () => updateRankedItem(args.winner.rankedItemId, args.winner.rating, args.winner.comparisons),
+  await recordComparisonAtomic({
+    rankingId: args.rankingId,
+    itemAId: args.winner.itemId,
+    itemBId: args.loser.itemId,
+    winnerItemId: args.winner.itemId,
+    winner: {
+      rankedItemId: args.winner.rankedItemId,
+      rating: args.winner.rating,
+      comparisons: args.winner.comparisons,
     },
-    {
-      write: 'loser rating',
-      run: () => updateRankedItem(args.loser.rankedItemId, args.loser.rating, args.loser.comparisons),
+    loser: {
+      rankedItemId: args.loser.rankedItemId,
+      rating: args.loser.rating,
+      comparisons: args.loser.comparisons,
     },
-    {
-      write: 'comparisons count',
-      run: () => incrementComparisonsCount(args.rankingId),
-    },
-    {
-      write: 'comparison record',
-      run: () => recordComparison(args.rankingId, args.winner.itemId, args.loser.itemId, args.winner.itemId),
-    },
-  ];
+  });
+}
 
-  // allSettled, not all: Promise.all rejects on the first failure and leaves
-  // the siblings' rejections unhandled, which React Native reports as
-  // "Possible Unhandled Promise Rejection" — noise the caller's catch cannot
-  // suppress, and it hides every failure after the first. Because these run in
-  // parallel any subset can land, so the caller needs the full list to know
-  // what state the ranking is actually in.
-  const results = await Promise.allSettled(writes.map(w => w.run()));
-
-  const failures = results.flatMap((result, i) =>
-    result.status === 'rejected' ? [{ write: writes[i].write, reason: result.reason }] : []
-  );
-
-  if (failures.length > 0) throw new ComparisonWriteError(failures);
+// A skipped matchup: recorded with a null winner and no rating change, via
+// the same atomic path as a decided comparison.
+export async function persistSkippedComparison(args: {
+  rankingId: string;
+  itemAId: string;
+  itemBId: string;
+}): Promise<void> {
+  await recordComparisonAtomic({
+    rankingId: args.rankingId,
+    itemAId: args.itemAId,
+    itemBId: args.itemBId,
+    winnerItemId: null,
+    winner: null,
+    loser: null,
+  });
 }
 
 // ============================================
