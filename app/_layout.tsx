@@ -5,12 +5,16 @@ import * as Linking from 'expo-linking';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AuthProvider, useAuth } from '../lib/auth-context';
 import { parseDeepLink, getRouteForDeepLink } from '../lib/deep-linking';
+import { installGlobalErrorHandlers } from '../lib/global-error-handlers';
 import {
   configureNotificationHandler,
   registerDeviceForUser,
   subscribeToNotificationTaps,
 } from '../lib/notifications';
 import { prunePartialRankings } from '../lib/partial-ranking';
+
+// Install before any other module load can throw or reject unhandled.
+installGlobalErrorHandlers();
 
 // Configure foreground handler once at module load — must be set before any
 // notification is received.
