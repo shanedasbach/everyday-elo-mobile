@@ -666,6 +666,17 @@ export interface PersistComparisonArgs {
   rankingId: string;
   winner: ComparisonSide;
   loser: ComparisonSide;
+  idempotencyKey: string;
+}
+
+// A fresh token identifying one logical comparison write. Callers generate
+// this once per write and must reuse the same value across retries of that
+// same write — record_comparison uses it to collapse a retried call into a
+// no-op instead of double-applying the count increment and audit-log insert.
+// Not a cryptographic UUID: uniqueness within this device's session is all
+// the dedup constraint needs.
+export function generateIdempotencyKey(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 // Applies both ranked_items updates, the comparisons_count increment, and
@@ -684,6 +695,7 @@ async function recordComparisonAtomic(args: {
   winnerItemId: string | null;
   winner: { rankedItemId: string; rating: number; comparisons: number } | null;
   loser: { rankedItemId: string; rating: number; comparisons: number } | null;
+  idempotencyKey: string;
 }): Promise<void> {
   const { error } = await supabase.rpc('record_comparison', {
     p_ranking_id: args.rankingId,
@@ -696,6 +708,7 @@ async function recordComparisonAtomic(args: {
     p_loser_ranked_item_id: args.loser?.rankedItemId ?? null,
     p_loser_rating: args.loser?.rating ?? null,
     p_loser_comparisons: args.loser?.comparisons ?? null,
+    p_idempotency_key: args.idempotencyKey,
   });
 
   if (error) throw error;
@@ -717,6 +730,7 @@ export async function persistComparison(args: PersistComparisonArgs): Promise<vo
       rating: args.loser.rating,
       comparisons: args.loser.comparisons,
     },
+    idempotencyKey: args.idempotencyKey,
   });
 }
 
@@ -726,6 +740,7 @@ export async function persistSkippedComparison(args: {
   rankingId: string;
   itemAId: string;
   itemBId: string;
+  idempotencyKey: string;
 }): Promise<void> {
   await recordComparisonAtomic({
     rankingId: args.rankingId,
@@ -734,6 +749,7 @@ export async function persistSkippedComparison(args: {
     winnerItemId: null,
     winner: null,
     loser: null,
+    idempotencyKey: args.idempotencyKey,
   });
 }
 

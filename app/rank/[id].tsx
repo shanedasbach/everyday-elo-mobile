@@ -31,6 +31,7 @@ import {
   markRankingCompleteAndNotify,
   persistComparison,
   PersistComparisonArgs,
+  generateIdempotencyKey,
   addListItem,
   deleteListItem,
   List,
@@ -272,6 +273,10 @@ export default function RankScreen() {
           rating: newLoserRating,
           comparisons: loser.comparisons + 1,
         },
+        // Generated once here and reused by every Retry attempt below, so a
+        // response that was actually committed but never acked back to the
+        // client collapses to a no-op on replay instead of double-applying.
+        idempotencyKey: generateIdempotencyKey(),
       });
     } else if (useOfflineMode && id) {
       // Persist offline/template progress after each comparison so save & exit

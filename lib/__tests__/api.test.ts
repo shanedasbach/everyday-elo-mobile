@@ -63,6 +63,7 @@ import {
   markRankingCompleteAndNotify,
   recordComparison,
   persistComparison,
+  generateIdempotencyKey,
   getFeaturedLists,
   duplicateList,
   followUser,
@@ -1167,6 +1168,7 @@ describe('API Module', () => {
         rating: 1480,
         comparisons: 2,
       },
+      idempotencyKey: 'token-1',
     };
 
     it('applies both rating updates, the count increment, and the comparison insert via one RPC call', async () => {
@@ -1189,6 +1191,7 @@ describe('API Module', () => {
         p_loser_ranked_item_id: args.loser.rankedItemId,
         p_loser_rating: args.loser.rating,
         p_loser_comparisons: args.loser.comparisons,
+        p_idempotency_key: args.idempotencyKey,
       });
 
       // No direct table writes — everything goes through the RPC.
@@ -1209,6 +1212,26 @@ describe('API Module', () => {
       expect(mockSupabase.from).not.toHaveBeenCalled();
     });
 
+    it('replays the same idempotency key on retry, so a repeated call is a no-op on the server rather than a second write', async () => {
+      // The client can't tell "the RPC truly failed" apart from "it
+      // committed but the ack was lost," so the only safe client-side
+      // behavior on failure is: retry with the exact same token. This
+      // asserts persistComparison holds up its half of that contract — it
+      // forwards whatever key it was given rather than minting a fresh one
+      // per call, which is what lets record_comparison's client_token
+      // dedup (supabase/migrations/20260805000000_atomic_record_comparison.sql)
+      // collapse the retry into a no-op server-side.
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
+
+      await persistComparison(args);
+      await persistComparison(args);
+
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(2);
+      const [firstCall, secondCall] = (mockSupabase.rpc as jest.Mock).mock.calls;
+      expect(firstCall[1].p_idempotency_key).toBe('token-1');
+      expect(secondCall[1].p_idempotency_key).toBe('token-1');
+    });
+
     it('records a skipped comparison with no winner and no rating change', async () => {
       (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
@@ -1216,6 +1239,7 @@ describe('API Module', () => {
         rankingId: 'ranking-1',
         itemAId: 'item-a',
         itemBId: 'item-b',
+        idempotencyKey: 'token-2',
       });
 
       expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
@@ -1230,6 +1254,7 @@ describe('API Module', () => {
         p_loser_ranked_item_id: null,
         p_loser_rating: null,
         p_loser_comparisons: null,
+        p_idempotency_key: 'token-2',
       });
     });
 
@@ -1238,8 +1263,20 @@ describe('API Module', () => {
       (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: rpcError });
 
       await expect(
-        persistSkippedComparison({ rankingId: 'ranking-1', itemAId: 'item-a', itemBId: 'item-b' })
+        persistSkippedComparison({
+          rankingId: 'ranking-1',
+          itemAId: 'item-a',
+          itemBId: 'item-b',
+          idempotencyKey: 'token-3',
+        })
       ).rejects.toEqual(rpcError);
+    });
+  });
+
+  describe('generateIdempotencyKey', () => {
+    it('returns a different value on each call', () => {
+      const keys = new Set(Array.from({ length: 20 }, () => generateIdempotencyKey()));
+      expect(keys.size).toBe(20);
     });
   });
 
