@@ -354,7 +354,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .in('id', creatorIds);
 
     if (profilesError) {
-      console.log('Creator names not available:', profilesError.message);
+      reportUnhandledError(profilesError, { source: 'getFeaturedLists.creatorNames' });
     } else {
       const nameById = new Map<string, string>();
       for (const profile of profiles || []) {
