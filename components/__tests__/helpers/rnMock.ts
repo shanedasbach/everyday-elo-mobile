@@ -24,12 +24,56 @@ export const View = host('View');
 export const Text = host('Text');
 export const TextInput = host('TextInput');
 export const KeyboardAvoidingView = host('KeyboardAvoidingView');
+export const ActivityIndicator = host('ActivityIndicator');
+export const SafeAreaView = host('SafeAreaView');
+export const ScrollView = host('ScrollView');
 
 // Touchables are host stubs like the rest; `disabled` is enforced by the
 // `press()` helper rather than here, so that a disabled node stays in the tree
 // and remains queryable (real RN renders disabled touchables too).
 export const TouchableOpacity = host('TouchableOpacity');
 export const Pressable = host('Pressable');
+
+// Static APIs (not components) that screens call imperatively. Plain
+// `jest.fn()`s so a test can assert calls and, for Alert, invoke a captured
+// button's `onPress` the same way a real user tapping it would.
+export const Alert = { alert: jest.fn() };
+export const Share = { share: jest.fn() };
+
+// Animated stub: a real Value plus View/spring/timing that resolve
+// synchronously. Screens under test only read `.interpolate()` for a style
+// and call `.start(callback)` to react to animation completion — tests drive
+// that completion by tapping the underlying control directly rather than
+// replaying pan-gesture events, so the stub only needs to be inert, not
+// numerically accurate.
+class AnimatedValueMock {
+  private value: number;
+  constructor(value: number) {
+    this.value = value;
+  }
+  setValue(value: number) {
+    this.value = value;
+  }
+  interpolate() {
+    return this.value;
+  }
+}
+
+function animationStub(value: AnimatedValueMock, config: { toValue: number }) {
+  return {
+    start: (cb?: () => void) => {
+      value.setValue(config.toValue);
+      cb?.();
+    },
+  };
+}
+
+export const Animated = {
+  Value: AnimatedValueMock,
+  View: host('Animated.View'),
+  spring: animationStub,
+  timing: animationStub,
+};
 
 // A real <Modal visible={false}> renders nothing. Mirroring that is what makes
 // "the modal renders while it should be hidden" — the single most user-visible
