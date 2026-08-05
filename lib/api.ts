@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { clearPartialRanking } from './partial-ranking';
+import { reportUnhandledError } from './error-reporting';
 
 // Types
 export interface List {
@@ -304,7 +305,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     .limit(20);
 
   if (error) {
-    console.log('Featured lists not available:', error.message);
+    reportUnhandledError(error, { source: 'getFeaturedLists' });
     return [];
   }
 
