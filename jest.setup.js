@@ -9,11 +9,13 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // only that one message so it doesn't drown the test output; everything else
 // still surfaces.
 //
-// Scoped two ways on purpose. It only installs for the component suites that
-// provoke the banner — the lib/ suites never touch react-test-renderer — and it
-// is always restored in afterAll, so the patch cannot outlive the file that
-// needs it or surprise anyone who later spies on console.error.
-const isComponentSuite = /[\\/]components[\\/]__tests__[\\/]/.test(
+// Scoped two ways on purpose. It only installs for the suites that provoke
+// the banner — the lib/ suites never touch react-test-renderer — and it is
+// always restored in afterAll, so the patch cannot outlive the file that
+// needs it or surprise anyone who later spies on console.error. Matches any
+// `__tests__` directory (components/ and app/screen __tests__ alike), not
+// just components/, since both render through the same helper.
+const isComponentSuite = /[\\/]__tests__[\\/]/.test(
   expect.getState().testPath ?? '',
 );
 
@@ -43,6 +45,7 @@ if (isComponentSuite) {
 jest.mock('expo-haptics', () => ({
   notificationAsync: jest.fn(),
   impactAsync: jest.fn(),
+  selectionAsync: jest.fn(),
   NotificationFeedbackType: {
     Success: 'success',
     Warning: 'warning',
