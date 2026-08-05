@@ -32,6 +32,8 @@ module.exports = {
     'lib/notifications.ts',
     'lib/supabase-config.ts',
     'lib/pair-selection.ts',
+    'lib/error-reporting.ts',
+    'lib/global-error-handlers.ts',
     // The four modals covered by issue #48, listed individually rather than as
     // `components/*.tsx`. The glob would also pull in FollowButton.tsx, which
     // landed on main separately and has no tests — dropping the global gate

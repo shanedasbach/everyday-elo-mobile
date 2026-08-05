@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { clearPartialRanking } from './partial-ranking';
+import { reportUnhandledError } from './error-reporting';
 
 // Types
 export interface List {
@@ -304,7 +305,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     .limit(20);
 
   if (error) {
-    console.log('Featured lists not available:', error.message);
+    reportUnhandledError(error, { source: 'getFeaturedLists' });
     return [];
   }
 
@@ -353,7 +354,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .in('id', creatorIds);
 
     if (profilesError) {
-      console.log('Creator names not available:', profilesError.message);
+      reportUnhandledError(profilesError, { source: 'getFeaturedLists.creatorNames' });
     } else {
       const nameById = new Map<string, string>();
       for (const profile of profiles || []) {
