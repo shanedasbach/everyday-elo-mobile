@@ -22,7 +22,11 @@ npm test:coverage    # Coverage report (95% threshold globally)
 - **Platform**: iOS (com.everydayelo.app), Android (com.everydayelo.app)
 
 ## Testing
-- Jest with jest-expo and ts-jest transform
+- Jest with `testEnvironment: 'node'` and ts-jest transform — no `jest-expo` or
+  `@testing-library/react-native`, both confirmed unusable on this Jest 30 /
+  Expo SDK 54 stack (see `components/__tests__/helpers/README.md`)
+- Component tests render against host stubs in `components/__tests__/helpers/`
+  (`rnMock.tsx`, `render.tsx`) via `react-test-renderer`
 - 95% coverage threshold on branches, functions, lines, and statements
 - Currently 100% coverage on lib modules (104 tests)
 - Test pattern: `**/__tests__/**/*.test.ts(x)` — any `__tests__` directory, including `app/` and `components/`

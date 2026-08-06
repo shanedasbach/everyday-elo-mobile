@@ -5,6 +5,14 @@ switch `testEnvironment` to `jest-expo`. **Both were tried against this repo's
 actual stack and both fail before a single test executes.** This file records
 the errors so the decision can be re-checked rather than taken on trust.
 
+Issue #73 asked to re-verify this rather than assume it from a code comment,
+and to settle on one shared harness instead of one per PR. Both paths were
+re-run 2026-08-06 against the versions below and reproduced the identical
+failures — the conclusion stands. The formerly-unused `jest-expo`,
+`@testing-library/react-native`, and `@testing-library/jest-native`
+devDependencies have been dropped from `package.json` accordingly; this
+`helpers/` harness is the one shared implementation going forward.
+
 Stack at time of writing:
 
 | Package | Version |
@@ -99,9 +107,10 @@ npx jest -c jest.probe.config.js
 
 Remember to delete `probe/` and `jest.probe.config.js` afterwards.
 
-## Unused devDependencies
+## Dropped devDependencies
 
-`@testing-library/react-native`, `@testing-library/jest-native` and `jest-expo`
-are in `devDependencies` but unusable while the above holds. They are left in
-place deliberately: they are what a Jest 29 move would switch back on, and
-dropping them is a dependency decision separate from this PR. Revisit together.
+`@testing-library/react-native`, `@testing-library/jest-native`, and
+`jest-expo` were removed from `devDependencies` (issue #73) — they were
+unusable while the above holds, and `@testing-library/jest-native` is
+upstream-deprecated besides. Re-add them if a future move to the Jest 29
+toolchain reopens Path A.
