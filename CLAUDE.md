@@ -11,7 +11,7 @@ npm test:coverage    # Coverage report (95% threshold globally)
 ```
 
 ## Architecture
-- **Expo SDK 54** with React Native 0.81 and React 19
+- **Expo SDK 57** with React Native 0.86 and React 19
 - **Expo Router** file-based navigation with typed routes
 - **Tab navigation**: browse, create, my-lists, profile
 - **Screens**: list/[id] detail, rank/[id] comparison, quick-add modal, (auth) sign-in/sign-up
