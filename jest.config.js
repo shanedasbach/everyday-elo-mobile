@@ -32,15 +32,13 @@ module.exports = {
     'lib/notifications.ts',
     'lib/supabase-config.ts',
     'lib/pair-selection.ts',
-    // The four modals covered by issue #48, listed individually rather than as
-    // `components/*.tsx`. The glob would also pull in FollowButton.tsx, which
-    // landed on main separately and has no tests — dropping the global gate
-    // below 95% and failing this PR for code it does not touch. Adding a
-    // component here is the deliberate step that puts it under the gate.
+    // Listed individually rather than as `components/*.tsx`, so a component
+    // joins the coverage gate only once it actually has tests.
     'components/AddItemModal.tsx',
     'components/BulkAddModal.tsx',
     'components/ItemActionMenu.tsx',
     'components/ListActionSheet.tsx',
+    'components/FollowButton.tsx',
   ],
   coverageThreshold: {
     global: {

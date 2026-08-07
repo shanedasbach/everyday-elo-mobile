@@ -24,6 +24,7 @@ export const View = host('View');
 export const Text = host('Text');
 export const TextInput = host('TextInput');
 export const KeyboardAvoidingView = host('KeyboardAvoidingView');
+export const ActivityIndicator = host('ActivityIndicator');
 
 // Touchables are host stubs like the rest; `disabled` is enforced by the
 // `press()` helper rather than here, so that a disabled node stays in the tree

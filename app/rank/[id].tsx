@@ -30,6 +30,8 @@ import {
   markRankingComplete,
   markRankingCompleteAndNotify,
   persistComparison,
+  PersistComparisonArgs,
+  generateIdempotencyKey,
   addListItem,
   deleteListItem,
   List,
@@ -203,6 +205,27 @@ export default function RankScreen() {
     }
   };
 
+  // Local state has already moved on by the time this runs (handleChoice
+  // updates ratings optimistically before persisting), so a swallowed
+  // failure here is invisible: the app shows a rating the database never
+  // recorded. Surface it and let the user retry the exact same write rather
+  // than silently losing it.
+  const persistComparisonWithRetry = async (persistArgs: PersistComparisonArgs): Promise<void> => {
+    try {
+      await persistComparison(persistArgs);
+    } catch (error) {
+      console.error('Failed to save comparison:', error);
+      Alert.alert(
+        'Comparison Not Saved',
+        'This comparison could not be saved to your ranking. Retry, or continue and it will be lost.',
+        [
+          { text: 'Retry', onPress: () => persistComparisonWithRetry(persistArgs) },
+          { text: 'Dismiss', style: 'cancel' },
+        ]
+      );
+    }
+  };
+
   const handleChoice = async (winnerIdx: number, loserIdx: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     
@@ -236,25 +259,25 @@ export default function RankScreen() {
 
     // Update Supabase if online
     if (!useOfflineMode && rankingId) {
-      try {
-        await persistComparison({
-          rankingId,
-          winner: {
-            rankedItemId: winner.id,
-            itemId: winner.itemId,
-            rating: newWinnerRating,
-            comparisons: winner.comparisons + 1,
-          },
-          loser: {
-            rankedItemId: loser.id,
-            itemId: loser.itemId,
-            rating: newLoserRating,
-            comparisons: loser.comparisons + 1,
-          },
-        });
-      } catch (error) {
-        console.error('Failed to save comparison:', error);
-      }
+      await persistComparisonWithRetry({
+        rankingId,
+        winner: {
+          rankedItemId: winner.id,
+          itemId: winner.itemId,
+          rating: newWinnerRating,
+          comparisons: winner.comparisons + 1,
+        },
+        loser: {
+          rankedItemId: loser.id,
+          itemId: loser.itemId,
+          rating: newLoserRating,
+          comparisons: loser.comparisons + 1,
+        },
+        // Generated once here and reused by every Retry attempt below, so a
+        // response that was actually committed but never acked back to the
+        // client collapses to a no-op on replay instead of double-applying.
+        idempotencyKey: generateIdempotencyKey(),
+      });
     } else if (useOfflineMode && id) {
       // Persist offline/template progress after each comparison so save & exit
       // (including unexpected backgrounding) resumes from the latest state.
