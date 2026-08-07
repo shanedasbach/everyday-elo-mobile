@@ -1323,6 +1323,65 @@ describe('API Module', () => {
     });
 
     describe('featured lists', () => {
+      // A batched count query asks for `count: 'exact'` alongside the rows, so
+      // the chain resolves with both. `reportedCount` is what the server claims
+      // matched; leaving it undefined means "server returned everything it had",
+      // which is the honest default for a small result set.
+      const makeCountChain = (
+        rows: Array<{ list_id: string }> | null,
+        error: any = null,
+        reportedCount?: number | null,
+      ) => {
+        const chain: any = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn(() =>
+            Promise.resolve(
+              error
+                ? { data: null, count: null, error }
+                : {
+                    data: rows,
+                    count: reportedCount === undefined ? (rows || []).length : reportedCount,
+                    error: null,
+                  }
+            )
+          ),
+        };
+        return chain;
+      };
+
+      // Builds a mock where from('featured_lists') returns the featured chain,
+      // from('list_items')/from('rankings') return paged count chains, and
+      // from('profiles') returns the batched creator-name lookup. Every call
+      // goes through mockSupabase.from, so its call count is the round-trip count.
+      const setupFeaturedMock = (
+        featuredData: any,
+        featuredError: any,
+        itemRows: Array<{ list_id: string }> | null = [],
+        rankingRows: Array<{ list_id: string }> | null = [],
+        profileRows: Array<{ id: string; name: string }> | null = [],
+        profilesError: any = null,
+      ) => {
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featuredData, error: featuredError }),
+        };
+        const itemsChain = makeCountChain(itemRows);
+        const rankingsChain = makeCountChain(rankingRows);
+        const profilesChain = {
+          select: jest.fn().mockReturnThis(),
+          in: jest.fn().mockResolvedValue({ data: profileRows, error: profilesError }),
+        };
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return itemsChain;
+          if (table === 'rankings') return rankingsChain;
+          if (table === 'profiles') return profilesChain;
+          throw new Error(`Unexpected table: ${table}`);
+        });
+        return { featuredChain, itemsChain, rankingsChain, profilesChain };
+      };
+
       it('should return featured lists with metadata', async () => {
         const featured = [
           {
@@ -1336,24 +1395,25 @@ describe('API Module', () => {
             },
           },
         ];
-
-        let callCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            callCount++;
-            if (callCount === 1) return Promise.resolve({ data: featured, error: null });
-            return Promise.resolve({ count: 5, error: null });
-          }),
-          eq: jest.fn().mockReturnThis(),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(
+          featured,
+          null,
+          [{ list_id: 'list-1' }, { list_id: 'list-1' }, { list_id: 'list-1' }],
+          [{ list_id: 'list-1' }, { list_id: 'list-1' }],
+        );
 
         const result = await getFeaturedLists();
 
-        expect(Array.isArray(result)).toBe(true);
-        expect(result.length).toBeGreaterThanOrEqual(0);
+        expect(result).toHaveLength(1);
+        expect(result[0]).toEqual({
+          id: 'f1',
+          list_id: 'list-1',
+          featured_at: '2024-01-01T00:00:00Z',
+          title: 'Top 10 Pizzas',
+          description: 'The best pizzas',
+          item_count: 3,
+          ranking_count: 2,
+        });
       });
 
       it('should skip items with null lists property', async () => {
@@ -1362,7 +1422,7 @@ describe('API Module', () => {
             id: 'f1',
             list_id: 'list-1',
             featured_at: '2024-01-01T00:00:00Z',
-            lists: null, // No associated list
+            lists: null,
           },
           {
             id: 'f2',
@@ -1375,33 +1435,17 @@ describe('API Module', () => {
             },
           },
         ];
-
-        let callCount = 0;
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockImplementation(() => {
-            callCount++;
-            if (callCount === 1) return Promise.resolve({ data: featured, error: null });
-            return Promise.resolve({ count: 3, error: null });
-          }),
-          eq: jest.fn().mockReturnThis(),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(featured, null, [{ list_id: 'list-2' }], []);
 
         const result = await getFeaturedLists();
 
-        // Should only have 1 result (the one with valid lists)
-        expect(result.length).toBeLessThanOrEqual(1);
+        expect(result).toHaveLength(1);
+        expect(result[0].list_id).toBe('list-2');
+        expect(result[0].item_count).toBe(1);
       });
 
       it('should handle empty data array', async () => {
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: [], error: null }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock([], null);
 
         const result = await getFeaturedLists();
 
@@ -1409,12 +1453,7 @@ describe('API Module', () => {
       });
 
       it('should handle null data', async () => {
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: null, error: null }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(null, null);
 
         const result = await getFeaturedLists();
 
@@ -1422,16 +1461,220 @@ describe('API Module', () => {
       });
 
       it('should return empty array on error', async () => {
-        const chain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: null, error: { message: 'Error' } }),
-        };
-        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+        setupFeaturedMock(null, { message: 'Error' });
 
         const result = await getFeaturedLists();
 
         expect(result).toEqual([]);
+      });
+
+      it('should default missing counts to 0 when a list has no items or rankings', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Empty', description: '' },
+          },
+        ];
+        // Both batched queries return empty arrays for this list_id
+        setupFeaturedMock(featured, null, [], []);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].item_count).toBe(0);
+        expect(result[0].ranking_count).toBe(0);
+      });
+
+      it('should treat null data from batched count queries as zero', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List', description: '' },
+          },
+        ];
+        setupFeaturedMock(featured, null, null, null);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].item_count).toBe(0);
+        expect(result[0].ranking_count).toBe(0);
+      });
+
+      it('should keep the lists when a count query fails, rather than failing the screen', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List', description: '' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const itemsChain = makeCountChain(null, { message: 'items exploded' });
+        const rankingsChain = makeCountChain([{ list_id: 'list-1' }]);
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return itemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`Unexpected table: ${table}`);
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].item_count).toBe(0);
+        expect(result[0].ranking_count).toBe(1);
+      });
+
+      // Regression guards for the silent-truncation defect: PostgREST caps a
+      // single select at db-max-rows and truncates with no error, so counting
+      // one unbounded response under-reports as soon as a popular featured list
+      // crosses the cap. The exact total the server reports alongside the rows
+      // is what makes that detectable without knowing the deployed cap.
+      //
+      // Two-list fixture used by the fallback tests below.
+      const twoFeatured = [
+        {
+          id: 'f1',
+          list_id: 'list-1',
+          featured_at: '2024-01-01T00:00:00Z',
+          lists: { id: 'list-1', title: 'Popular', description: '' },
+        },
+        {
+          id: 'f2',
+          list_id: 'list-2',
+          featured_at: '2024-01-02T00:00:00Z',
+          lists: { id: 'list-2', title: 'Also Popular', description: '' },
+        },
+      ];
+
+      // A chain whose batched `.in()` under-delivers relative to the total it
+      // reports, and whose `.eq()` answers the exact per-list head counts the
+      // fallback then asks for.
+      const makeTruncatedCountChain = (
+        returnedRows: Array<{ list_id: string }>,
+        reportedCount: number | null,
+        exactCounts: Record<string, number>,
+        exactError: any = null,
+      ) => ({
+        select: jest.fn().mockReturnThis(),
+        in: jest.fn(() =>
+          Promise.resolve({ data: returnedRows, count: reportedCount, error: null })
+        ),
+        eq: jest.fn((_column: string, listId: string) =>
+          Promise.resolve(
+            exactError
+              ? { count: null, error: exactError }
+              : // A list absent from exactCounts stands in for a successful
+                // head request that carried no total.
+                { count: exactCounts[listId] ?? null, error: null }
+          )
+        ),
+      });
+
+      const setupTruncatedMock = (rankingsChain: any) => {
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: twoFeatured, error: null }),
+        };
+        const itemsChain = makeCountChain([{ list_id: 'list-1' }]);
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return itemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`Unexpected table: ${table}`);
+        });
+        return { itemsChain };
+      };
+
+      it('should fall back to exact per-list counts when the batched response is truncated', async () => {
+        // Server hands back 1000 rows but reports 1500 matched — the response
+        // was capped. Counting what arrived would report 1000, silently low.
+        const returnedRows = Array.from({ length: 1000 }, () => ({ list_id: 'list-1' }));
+        const rankingsChain = makeTruncatedCountChain(returnedRows, 1500, {
+          'list-1': 1400,
+          'list-2': 100,
+        });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(1400);
+        expect(result[1].ranking_count).toBe(100);
+        // One exact head count per list, issued together rather than serially.
+        expect(rankingsChain.eq).toHaveBeenCalledTimes(2);
+        expect(rankingsChain.eq).toHaveBeenNthCalledWith(1, 'list_id', 'list-1');
+        expect(rankingsChain.eq).toHaveBeenNthCalledWith(2, 'list_id', 'list-2');
+        expect(rankingsChain.select).toHaveBeenCalledWith('id', { count: 'exact', head: true });
+      });
+
+      it('should fall back when the server reports no total at all', async () => {
+        // No `Content-Range` total means completeness cannot be proven, so the
+        // batched breakdown must not be trusted even though nothing errored.
+        const rankingsChain = makeTruncatedCountChain([{ list_id: 'list-1' }], null, {
+          'list-1': 7,
+          'list-2': 3,
+        });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(7);
+        expect(result[1].ranking_count).toBe(3);
+        expect(rankingsChain.eq).toHaveBeenCalledTimes(2);
+      });
+
+      it('should not fall back when the batched response is provably complete', async () => {
+        // Rows returned == total reported, so the breakdown is complete and no
+        // per-list query should be issued.
+        const rankingsChain = makeTruncatedCountChain(
+          [{ list_id: 'list-1' }, { list_id: 'list-2' }],
+          2,
+          { 'list-1': 999, 'list-2': 999 },
+        );
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(1);
+        expect(result[1].ranking_count).toBe(1);
+        expect(rankingsChain.eq).not.toHaveBeenCalled();
+      });
+
+      it('should treat a fallback head request with no total as 0', async () => {
+        const returnedRows = Array.from({ length: 10 }, () => ({ list_id: 'list-1' }));
+        // list-2 answers without a count — not an error, just nothing to report.
+        const rankingsChain = makeTruncatedCountChain(returnedRows, 5000, { 'list-1': 4900 });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].ranking_count).toBe(4900);
+        expect(result[1].ranking_count).toBe(0);
+      });
+
+      it('should show 0 rather than a partial number when an exact fallback count fails', async () => {
+        const returnedRows = Array.from({ length: 10 }, () => ({ list_id: 'list-1' }));
+        const rankingsChain = makeTruncatedCountChain(returnedRows, 5000, {}, {
+          message: 'count exploded',
+        });
+        setupTruncatedMock(rankingsChain);
+
+        const result = await getFeaturedLists();
+
+        // A list left out of the map degrades to 0 — never to the truncated 10.
+        expect(result[0].ranking_count).toBe(0);
+        expect(result[1].ranking_count).toBe(0);
       });
 
       it('should populate creator_name from a single batched profiles query', async () => {
@@ -1456,32 +1699,10 @@ describe('API Module', () => {
             lists: { id: 'list-3', title: 'List Three', description: 'd3', creator_id: 'user-2' },
           },
         ];
-
-        const featuredChain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
-        };
-        const countChain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockResolvedValue({ count: 7, error: null }),
-        };
-        const inMock = jest.fn().mockResolvedValue({
-          data: [
-            { id: 'user-1', name: 'Alice' },
-            { id: 'user-2', name: 'Bob' },
-          ],
-          error: null,
-        });
-        const profilesChain = {
-          select: jest.fn().mockReturnThis(),
-          in: inMock,
-        };
-        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
-          if (table === 'featured_lists') return featuredChain;
-          if (table === 'profiles') return profilesChain;
-          return countChain;
-        });
+        const { profilesChain } = setupFeaturedMock(featured, null, [], [], [
+          { id: 'user-1', name: 'Alice' },
+          { id: 'user-2', name: 'Bob' },
+        ]);
 
         const result = await getFeaturedLists();
 
@@ -1489,7 +1710,7 @@ describe('API Module', () => {
         // One profiles query, with deduped creator ids.
         expect(mockSupabase.from).toHaveBeenCalledWith('profiles');
         expect(profilesChain.select).toHaveBeenCalledTimes(1);
-        expect(inMock).toHaveBeenCalledWith('id', ['user-1', 'user-2']);
+        expect(profilesChain.in).toHaveBeenCalledWith('id', ['user-1', 'user-2']);
       });
 
       it('should leave creator_name undefined when a creator has no profile match', async () => {
@@ -1501,28 +1722,43 @@ describe('API Module', () => {
             lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'ghost' },
           },
         ];
-        const featuredChain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
-        };
-        const countChain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockResolvedValue({ count: 0, error: null }),
-        };
-        const profilesChain = {
-          select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockResolvedValue({ data: [], error: null }),
-        };
-        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
-          if (table === 'featured_lists') return featuredChain;
-          if (table === 'profiles') return profilesChain;
-          return countChain;
-        });
+        setupFeaturedMock(featured, null, [], [], []);
 
         const result = await getFeaturedLists();
 
         expect(result).toHaveLength(1);
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should ignore profile rows with a missing id or name', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], [], [{ id: 'user-1', name: '' } as any]);
+
+        const result = await getFeaturedLists();
+
+        expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should treat null profile data as no names', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
+          },
+        ];
+        setupFeaturedMock(featured, null, [], [], null);
+
+        const result = await getFeaturedLists();
+
         expect(result[0].creator_name).toBeUndefined();
       });
 
@@ -1535,24 +1771,7 @@ describe('API Module', () => {
             lists: { id: 'list-1', title: 'List One', description: 'd1', creator_id: 'user-1' },
           },
         ];
-        const featuredChain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
-        };
-        const countChain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockResolvedValue({ count: 0, error: null }),
-        };
-        const profilesChain = {
-          select: jest.fn().mockReturnThis(),
-          in: jest.fn().mockResolvedValue({ data: null, error: { message: 'boom' } }),
-        };
-        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
-          if (table === 'featured_lists') return featuredChain;
-          if (table === 'profiles') return profilesChain;
-          return countChain;
-        });
+        setupFeaturedMock(featured, null, [], [], null, { message: 'boom' });
 
         const result = await getFeaturedLists();
 
@@ -1570,24 +1789,59 @@ describe('API Module', () => {
             lists: { id: 'list-1', title: 'List One', description: 'd1' },
           },
         ];
-        const featuredChain = {
-          select: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
-        };
-        const countChain = {
-          select: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockResolvedValue({ count: 0, error: null }),
-        };
-        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
-          if (table === 'featured_lists') return featuredChain;
-          return countChain;
-        });
+        setupFeaturedMock(featured, null, [], []);
 
         const result = await getFeaturedLists();
 
         expect(result).toHaveLength(1);
         expect(mockSupabase.from).not.toHaveBeenCalledWith('profiles');
+      });
+
+      // Acceptance criteria: query count must be constant regardless of N.
+      // Asserting the equality of two sizes rather than a literal, so that a
+      // future query added to this function does not turn the AC into a false
+      // failure while still catching any per-list round-trip creeping back in.
+      const queryCountFor = async (n: number) => {
+        const featured = Array.from({ length: n }, (_, i) => ({
+          id: `f${i}`,
+          list_id: `list-${i}`,
+          featured_at: '2024-01-01T00:00:00Z',
+          lists: { id: `list-${i}`, title: `List ${i}`, description: '', creator_id: `user-${i}` },
+        }));
+        // Give every list one item and one ranking
+        const itemRows = featured.map((f) => ({ list_id: f.list_id }));
+        const rankingRows = featured.map((f) => ({ list_id: f.list_id }));
+        const profileRows = featured.map((_, i) => ({ id: `user-${i}`, name: `User ${i}` }));
+        setupFeaturedMock(featured, null, itemRows, rankingRows, profileRows);
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(n);
+        result.forEach((r, i) => {
+          expect(r.item_count).toBe(1);
+          expect(r.ranking_count).toBe(1);
+          expect(r.creator_name).toBe(`User ${i}`);
+        });
+        return (mockSupabase.from as jest.Mock).mock.calls.length;
+      };
+
+      it('should issue the same number of queries for N=5 and N=20', async () => {
+        const smallN = await queryCountFor(5);
+        jest.clearAllMocks();
+        const largeN = await queryCountFor(20);
+
+        expect(largeN).toBe(smallN);
+        // And it is a handful of table reads, not a per-list round-trip.
+        expect(largeN).toBeLessThanOrEqual(4);
+      });
+
+      it('should read each table exactly once for a normal page of results', async () => {
+        await queryCountFor(20);
+
+        expect(mockSupabase.from).toHaveBeenCalledWith('featured_lists');
+        expect(mockSupabase.from).toHaveBeenCalledWith('list_items');
+        expect(mockSupabase.from).toHaveBeenCalledWith('rankings');
+        expect(mockSupabase.from).toHaveBeenCalledWith('profiles');
       });
     });
   });
@@ -1640,6 +1894,10 @@ describe('API Module', () => {
         lists: any[];
         items?: any[];
         rankings?: any[];
+        // What the server claims matched, when that differs from what it
+        // returned — i.e. a truncated batched count.
+        itemsReportedCount?: number;
+        exactItemCounts?: Record<string, number>;
       }) => {
         const fromCalls: string[] = [];
         const chainFor = (table: string) => {
@@ -1651,9 +1909,19 @@ describe('API Module', () => {
             };
           }
           if (table === 'list_items') {
+            const items = opts.items ?? [];
             return {
               select: jest.fn().mockReturnThis(),
-              in: jest.fn().mockResolvedValue({ data: opts.items ?? [], error: null }),
+              in: jest.fn().mockResolvedValue({
+                data: items,
+                count: opts.itemsReportedCount ?? items.length,
+                error: null,
+              }),
+              // Only reached when the batched count above is short of the total
+              // it reports — the shared countRowsByListId fallback.
+              eq: jest.fn((_column: string, listId: string) =>
+                Promise.resolve({ count: opts.exactItemCounts?.[listId] ?? 0, error: null })
+              ),
             };
           }
           if (table === 'rankings') {
@@ -1779,6 +2047,40 @@ describe('API Module', () => {
         expect(result).toHaveLength(10);
         // Every list has 2 items, so estimatedComparisons == 4
         result.forEach((r) => expect(r.estimatedComparisons).toBe(4));
+      });
+
+      it('should default to zero items and no ranking when both batched queries come back empty', async () => {
+        buildMock({
+          lists: [{ id: 'l1', title: 'Has items' }, { id: 'l2', title: 'Empty' }],
+          items: [{ list_id: 'l1' }],
+          rankings: null as any,
+        });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        expect(result[1].itemCount).toBe(0);
+        expect(result[1].estimatedComparisons).toBe(0);
+        expect(result.map((r) => r.rankingStatus)).toEqual(['not_started', 'not_started']);
+      });
+
+      // This call site shares countRowsByListId with getFeaturedLists, so a
+      // user whose own lists hold more rows than db-max-rows gets exact counts
+      // here too rather than a silently capped number.
+      it('should fall back to exact item counts when the batched count is truncated', async () => {
+        const { fromCalls } = buildMock({
+          lists: [{ id: 'l1', title: 'Huge' }, { id: 'l2', title: 'Small' }],
+          items: Array.from({ length: 1000 }, () => ({ list_id: 'l1' })),
+          itemsReportedCount: 1200,
+          exactItemCounts: { l1: 1150, l2: 50 },
+        });
+
+        const result = await getUserListsWithStatus('user-1');
+
+        expect(result[0].itemCount).toBe(1150);
+        expect(result[1].itemCount).toBe(50);
+        expect(result[0].estimatedComparisons).toBe(2300);
+        // One exact count per list, on top of the batched attempt.
+        expect(fromCalls.filter((t) => t === 'list_items')).toHaveLength(3);
       });
 
       it('should short-circuit and skip batched queries when user has no lists', async () => {

@@ -218,21 +218,19 @@ export async function getUserListsWithStatus(userId: string): Promise<ListWithSt
   const listIds = lists.map((l) => l.id);
 
   // Batch-fetch items and rankings for all lists in two queries, regardless of N.
-  // Total round-trips: 1 lists + 1 items + 1 rankings.
-  const [itemsRes, rankingsRes] = await Promise.all([
-    supabase.from('list_items').select('list_id').in('list_id', listIds),
+  // Total round-trips: 1 lists + 1 items + 1 rankings. Item counts go through
+  // countRowsByListId so this call site and getFeaturedLists share one
+  // convention — a user with more than db-max-rows list items across their own
+  // lists hits the same silent-truncation ceiling, just later than the
+  // unbounded featured tables do.
+  const [itemCounts, rankingsRes] = await Promise.all([
+    countRowsByListId('list_items', listIds),
     supabase
       .from('rankings')
       .select('list_id, comparisons_count, is_complete')
       .in('list_id', listIds)
       .eq('user_id', userId),
   ]);
-
-  const itemCounts = new Map<string, number>();
-  for (const row of itemsRes.data || []) {
-    const id = (row as any).list_id;
-    itemCounts.set(id, (itemCounts.get(id) || 0) + 1);
-  }
 
   const rankingsByList = new Map<string, { comparisons_count: number; is_complete: boolean }>();
   for (const row of rankingsRes.data || []) {
@@ -286,6 +284,92 @@ export interface FeaturedList {
   creator_name?: string;
 }
 
+// Exact server-side count per list, all issued together. Costs N requests but
+// only one round-trip of wall-clock latency, carries no row payload, and has no
+// row ceiling — this is the fallback for when the batched count below cannot be
+// proven complete. A list whose count query fails is left out of the map rather
+// than being given a wrong number; the caller's `|| 0` then shows it as 0.
+async function countRowsPerListExact(
+  table: 'list_items' | 'rankings',
+  listIds: string[]
+): Promise<Map<string, number>> {
+  const results = await Promise.all(
+    listIds.map(async (listId) => {
+      const { count, error } = await supabase
+        .from(table)
+        .select('id', { count: 'exact', head: true })
+        .eq('list_id', listId);
+
+      if (error) {
+        console.log(`Exact ${table} count for list ${listId} not available:`, error.message);
+        return null;
+      }
+      return [listId, count || 0] as const;
+    })
+  );
+
+  const counts = new Map<string, number>();
+  for (const result of results) {
+    if (result) counts.set(result[0], result[1]);
+  }
+  return counts;
+}
+
+// PostgREST caps the rows any single select may return (`db-max-rows`, 1000 by
+// default) and truncates the response *silently* — so counting the rows of one
+// `.in('list_id', …)` fetch in JS under-reports as soon as a table outgrows the
+// cap. `rankings` is the exposed one here: it spans every user who has ranked a
+// featured list, and featured lists are by definition the popular ones.
+//
+// Asking for `count: 'exact'` on that same request is what removes the guess.
+// PostgREST reports the true number of matching rows in `Content-Range`
+// independently of how many it chose to return, so `rows.length < count` *is*
+// the truncation signal — the deployed cap never has to be known or assumed.
+//
+// When the two agree, the per-list breakdown is provably complete and this cost
+// one query per table regardless of N (issue #29's constant-query-count AC).
+// When they disagree, fall back to exact server-side counts rather than
+// reporting a number known to be low (#29's exact-counts AC). The fallback is
+// still one round-trip of latency, so neither path reintroduces the serial
+// per-list waterfall that #29 was filed about.
+async function countRowsByListId(
+  table: 'list_items' | 'rankings',
+  listIds: string[]
+): Promise<Map<string, number>> {
+  const { data, count, error } = await supabase
+    .from(table)
+    .select('list_id', { count: 'exact' })
+    .in('list_id', listIds);
+
+  if (error) {
+    // Match getFeaturedLists' tolerance for a missing/failing table: report it
+    // rather than failing the whole browse screen. Loud, not silent — and an
+    // empty map degrades every count to 0 uniformly instead of showing a
+    // plausible-looking partial number.
+    console.log(`Counts for ${table} not available:`, error.message);
+    return new Map();
+  }
+
+  const rows = data || [];
+
+  // `count == null` covers a server that declined to report a total; treat
+  // unknown as untrustworthy rather than assuming completeness.
+  if (count == null || rows.length < count) {
+    console.log(
+      `Batched ${table} counts incomplete (${rows.length} rows of ${count ?? 'unknown'}); ` +
+        'falling back to exact per-list counts'
+    );
+    return countRowsPerListExact(table, listIds);
+  }
+
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const id = (row as any).list_id;
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  return counts;
+}
+
 export async function getFeaturedLists(): Promise<FeaturedList[]> {
   const { data, error } = await supabase
     .from('featured_lists')
@@ -308,40 +392,39 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     return [];
   }
 
-  // Transform the data, tracking each list's creator so names can be
-  // resolved in a single batched query afterwards (avoids a per-list round-trip).
-  const featured: FeaturedList[] = [];
+  const validRows = (data || []).filter((row) => (row as any).lists);
+  if (validRows.length === 0) return [];
+
+  const listIds = validRows.map((row) => ((row as any).lists as any).id);
+
+  // Batch-count both tables for every featured list at once. Round-trips no
+  // longer grow with the number of featured lists — see countRowsByListId for
+  // how each count proves itself complete rather than trusting one select.
+  const [itemCounts, rankingCounts] = await Promise.all([
+    countRowsByListId('list_items', listIds),
+    countRowsByListId('rankings', listIds),
+  ]);
+
+  // Track each list's creator so names can be resolved in a single batched
+  // query afterwards (avoids a per-list round-trip).
   const creatorIdByListId = new Map<string, string>();
-  for (const item of data || []) {
-    const list = item.lists as any;
-    if (!list) continue;
-
-    // Get item count
-    const { count: itemCount } = await supabase
-      .from('list_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('list_id', list.id);
-
-    // Get ranking count
-    const { count: rankingCount } = await supabase
-      .from('rankings')
-      .select('id', { count: 'exact', head: true })
-      .eq('list_id', list.id);
+  const featured: FeaturedList[] = validRows.map((row) => {
+    const list = (row as any).lists as any;
 
     if (list.creator_id) {
       creatorIdByListId.set(list.id, list.creator_id);
     }
 
-    featured.push({
-      id: item.id,
+    return {
+      id: (row as any).id,
       list_id: list.id,
-      featured_at: item.featured_at,
+      featured_at: (row as any).featured_at,
       title: list.title,
       description: list.description,
-      item_count: itemCount || 0,
-      ranking_count: rankingCount || 0,
-    });
-  }
+      item_count: itemCounts.get(list.id) || 0,
+      ranking_count: rankingCounts.get(list.id) || 0,
+    };
+  });
 
   // Resolve creator display names in a single batched query, then map onto
   // each featured list. Unresolved creators simply leave creator_name undefined.
