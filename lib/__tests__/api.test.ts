@@ -57,7 +57,6 @@ import {
   getCompletedRankingForList,
   getRankedItems,
   updateRankedItem,
-  incrementComparisonsCount,
   persistSkippedComparison,
   markRankingComplete,
   markRankingCompleteAndNotify,
@@ -1114,39 +1113,6 @@ describe('API Module', () => {
       await expect(
         recordComparison('r1', 'a', 'b', 'a')
       ).rejects.toEqual({ message: 'Insert failed' });
-    });
-  });
-
-  // ============================================
-  // USE CASE 6: Incrementing Comparison Count
-  // ============================================
-  describe('Incrementing Comparison Count', () => {
-    it('should call the increment_comparisons_count RPC with the ranking id', async () => {
-      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
-
-      await incrementComparisonsCount('ranking-1');
-
-      expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
-      expect(mockSupabase.rpc).toHaveBeenCalledWith('increment_comparisons_count', {
-        p_ranking_id: 'ranking-1',
-      });
-      // No table-level read or update — the RPC does both atomically server-side.
-      expect(mockSupabase.from).not.toHaveBeenCalled();
-    });
-
-    it('should resolve when the ranking does not exist (RPC is idempotent)', async () => {
-      // A missing ranking is not an error from the RPC's perspective — the
-      // UPDATE simply affects zero rows. We still expect the helper to resolve.
-      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
-
-      await expect(incrementComparisonsCount('nonexistent')).resolves.toBeUndefined();
-    });
-
-    it('should surface RPC errors instead of swallowing them', async () => {
-      const rpcError = { message: 'RLS denied', code: '42501' };
-      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: rpcError });
-
-      await expect(incrementComparisonsCount('ranking-1')).rejects.toEqual(rpcError);
     });
   });
 
