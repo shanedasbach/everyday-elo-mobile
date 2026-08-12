@@ -14,6 +14,7 @@
 
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
+import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import { router } from 'expo-router';
 import { supabase } from './supabase';
@@ -113,6 +114,27 @@ export async function removePushToken(token: string): Promise<void> {
   if (error) throw error;
 }
 
+const LAST_PUSH_TOKEN_KEY = 'last_push_token';
+
+/**
+ * Locally persist the most recently registered push token, so sign-out can
+ * revoke it without re-deriving it via a fresh permission check + network
+ * round-trip to Expo's push service.
+ */
+export async function persistLastPushToken(token: string): Promise<void> {
+  await SecureStore.setItemAsync(LAST_PUSH_TOKEN_KEY, token);
+}
+
+/** Read the last push token persisted by {@link persistLastPushToken}, if any. */
+export async function getPersistedPushToken(): Promise<string | null> {
+  return SecureStore.getItemAsync(LAST_PUSH_TOKEN_KEY);
+}
+
+/** Clear the persisted push token — call once it has been revoked. */
+export async function clearPersistedPushToken(): Promise<void> {
+  await SecureStore.deleteItemAsync(LAST_PUSH_TOKEN_KEY);
+}
+
 /**
  * Register the current user's device for push notifications and persist the
  * token. Safe to call repeatedly. Returns the token or null.
@@ -120,6 +142,7 @@ export async function removePushToken(token: string): Promise<void> {
 export async function registerDeviceForUser(userId: string): Promise<string | null> {
   const token = await registerForPushNotificationsAsync();
   if (!token) return null;
+  await persistLastPushToken(token);
   try {
     await savePushToken(userId, token);
   } catch {
