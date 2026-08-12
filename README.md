@@ -4,7 +4,7 @@ iOS and Android app for Everyday Elo - rank anything with rapid-fire comparisons
 
 ## Tech Stack
 
-- **Framework:** Expo SDK 54
+- **Framework:** Expo SDK 57
 - **Navigation:** Expo Router
 - **Language:** TypeScript
 - **Backend:** Supabase (shared with web app)
