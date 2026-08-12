@@ -11,6 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import { findDuplicateItemName, hasDuplicateWithinBatch } from '../lib/duplicate-item-name';
 
 interface BulkAddModalProps {
   visible: boolean;
@@ -39,11 +40,7 @@ export default function BulkAddModal({ visible, onClose, onAdd, existingItems }:
     }
 
     // Check for duplicates with existing items
-    const duplicates = items.filter(item => 
-      existingItems.some(existing => 
-        existing.toLowerCase() === item.toLowerCase()
-      )
-    );
+    const duplicates = items.filter(item => findDuplicateItemName(item, existingItems));
 
     if (duplicates.length > 0) {
       setError(`Already exists: ${duplicates.slice(0, 3).join(', ')}${duplicates.length > 3 ? '...' : ''}`);
@@ -51,8 +48,7 @@ export default function BulkAddModal({ visible, onClose, onAdd, existingItems }:
     }
 
     // Check for duplicates within the input
-    const uniqueItems = [...new Set(items.map(i => i.toLowerCase()))];
-    if (uniqueItems.length !== items.length) {
+    if (hasDuplicateWithinBatch(items)) {
       setError('Some items are duplicated');
       return;
     }

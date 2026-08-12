@@ -32,6 +32,7 @@ module.exports = {
     'lib/notifications.ts',
     'lib/supabase-config.ts',
     'lib/pair-selection.ts',
+    'lib/duplicate-item-name.ts',
     // Listed individually rather than as `components/*.tsx`, so a component
     // joins the coverage gate only once it actually has tests.
     'components/AddItemModal.tsx',

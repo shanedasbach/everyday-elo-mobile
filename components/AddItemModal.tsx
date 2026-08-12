@@ -11,6 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import { findDuplicateItemName } from '../lib/duplicate-item-name';
 
 interface AddItemModalProps {
   visible: boolean;
@@ -32,7 +33,7 @@ export default function AddItemModal({ visible, onClose, onAdd, existingItems }:
     }
 
     // Check for duplicates
-    if (existingItems.some(item => item.toLowerCase() === trimmed.toLowerCase())) {
+    if (findDuplicateItemName(trimmed, existingItems)) {
       setError('This item already exists');
       return;
     }
