@@ -38,6 +38,12 @@ jest.mock('expo-router', () => ({
   router: { push: jest.fn() },
 }));
 
+jest.mock('expo-secure-store', () => ({
+  setItemAsync: jest.fn(),
+  getItemAsync: jest.fn(),
+  deleteItemAsync: jest.fn(),
+}));
+
 jest.mock('../supabase', () => ({
   supabase: {
     from: jest.fn(),
@@ -45,6 +51,7 @@ jest.mock('../supabase', () => ({
 }));
 
 import * as Notifications from 'expo-notifications';
+import * as SecureStore from 'expo-secure-store';
 import { router } from 'expo-router';
 import { supabase } from '../supabase';
 import {
@@ -54,6 +61,9 @@ import {
   savePushToken,
   removePushToken,
   registerDeviceForUser,
+  persistLastPushToken,
+  getPersistedPushToken,
+  clearPersistedPushToken,
   handleNotificationResponse,
   subscribeToNotificationTaps,
 } from '../notifications';
@@ -203,9 +213,10 @@ describe('Notifications module', () => {
 
       expect(result).toBeNull();
       expect(supabase.from).not.toHaveBeenCalled();
+      expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
     });
 
-    it('persists the token and returns it when registration succeeds', async () => {
+    it('persists the token locally and remotely, and returns it when registration succeeds', async () => {
       (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
       const upsert = jest.fn().mockResolvedValue({ error: null });
@@ -215,9 +226,10 @@ describe('Notifications module', () => {
 
       expect(result).toBe('tok-ok');
       expect(upsert).toHaveBeenCalled();
+      expect(SecureStore.setItemAsync).toHaveBeenCalledWith('last_push_token', 'tok-ok');
     });
 
-    it('still returns the token when persistence fails', async () => {
+    it('still returns the token when remote persistence fails', async () => {
       (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
       const upsert = jest.fn().mockResolvedValue({ error: { message: 'transient' } });
@@ -226,6 +238,31 @@ describe('Notifications module', () => {
       const result = await registerDeviceForUser('user-1');
 
       expect(result).toBe('tok-ok');
+    });
+  });
+
+  describe('local push-token persistence', () => {
+    it('persistLastPushToken writes the token via SecureStore', async () => {
+      await persistLastPushToken('tok-1');
+      expect(SecureStore.setItemAsync).toHaveBeenCalledWith('last_push_token', 'tok-1');
+    });
+
+    it('getPersistedPushToken reads the token via SecureStore', async () => {
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('tok-1');
+      const result = await getPersistedPushToken();
+      expect(SecureStore.getItemAsync).toHaveBeenCalledWith('last_push_token');
+      expect(result).toBe('tok-1');
+    });
+
+    it('getPersistedPushToken returns null when nothing is stored', async () => {
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue(null);
+      const result = await getPersistedPushToken();
+      expect(result).toBeNull();
+    });
+
+    it('clearPersistedPushToken deletes the stored token', async () => {
+      await clearPersistedPushToken();
+      expect(SecureStore.deleteItemAsync).toHaveBeenCalledWith('last_push_token');
     });
   });
 
