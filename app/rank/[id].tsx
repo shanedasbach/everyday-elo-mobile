@@ -8,7 +8,7 @@ import {
 } from 'react-native-gesture-handler';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import { expectedScore, K_FACTOR, pairKey } from '../../lib/elo';
+import { calculateNewRatings, pairKey } from '../../lib/elo';
 import { selectNextPairIndices } from '../../lib/pair-selection';
 import {
   SWIPE_THRESHOLD,
@@ -235,11 +235,10 @@ export default function RankScreen() {
     // Remember this matchup so it isn't surfaced again while unseen ones remain.
     seenPairs.current.add(pairKey(winner.itemId, loser.itemId));
 
-    const expectedWinner = expectedScore(winner.rating, loser.rating);
-    const expectedLoser = expectedScore(loser.rating, winner.rating);
-    
-    const newWinnerRating = Math.round(winner.rating + K_FACTOR * (1 - expectedWinner));
-    const newLoserRating = Math.round(loser.rating + K_FACTOR * (0 - expectedLoser));
+    const { winnerRating: newWinnerRating, loserRating: newLoserRating } = calculateNewRatings(
+      winner,
+      loser
+    );
 
     // Update state
     const newItems = [...rankedItems];
