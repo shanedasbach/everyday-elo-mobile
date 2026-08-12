@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { clearPartialRanking } from './partial-ranking';
+import { estimateComparisonsNeeded } from './elo';
 
 // Types
 export interface List {
@@ -259,7 +260,7 @@ export async function getUserListsWithStatus(userId: string): Promise<ListWithSt
       itemCount,
       rankingStatus: status,
       comparisonsCount,
-      estimatedComparisons: itemCount * 2,
+      estimatedComparisons: estimateComparisonsNeeded(itemCount),
     };
   });
 }
