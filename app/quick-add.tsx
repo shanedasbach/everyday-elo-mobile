@@ -14,6 +14,7 @@ import { router, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../lib/auth-context';
 import { getUserLists, addListItem, getListItems, List, ListItem } from '../lib/api';
+import { findDuplicateItemName } from '../lib/duplicate-item-name';
 import BulkAddModal from '../components/BulkAddModal';
 
 export default function QuickAddScreen() {
@@ -69,8 +70,7 @@ export default function QuickAddScreen() {
     if (!trimmed || !selectedList) return;
 
     // Check for duplicates
-    if (existingItems.some(i => i.toLowerCase() === trimmed.toLowerCase()) ||
-        addedItems.some(i => i.toLowerCase() === trimmed.toLowerCase())) {
+    if (findDuplicateItemName(trimmed, [...existingItems, ...addedItems])) {
       Alert.alert('Duplicate', 'This item already exists in the list');
       return;
     }
