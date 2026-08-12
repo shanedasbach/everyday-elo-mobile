@@ -317,16 +317,26 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     if (!list) continue;
 
     // Get item count
-    const { count: itemCount } = await supabase
+    const { count: itemCount, error: itemCountError } = await supabase
       .from('list_items')
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
 
+    if (itemCountError) {
+      console.log(`Item count for list ${list.id} not available:`, itemCountError.message);
+      continue;
+    }
+
     // Get ranking count
-    const { count: rankingCount } = await supabase
+    const { count: rankingCount, error: rankingCountError } = await supabase
       .from('rankings')
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
+
+    if (rankingCountError) {
+      console.log(`Ranking count for list ${list.id} not available:`, rankingCountError.message);
+      continue;
+    }
 
     if (list.creator_id) {
       creatorIdByListId.set(list.id, list.creator_id);

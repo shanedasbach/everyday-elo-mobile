@@ -1561,6 +1561,100 @@ describe('API Module', () => {
         expect(result[0].creator_name).toBeUndefined();
       });
 
+      it('should skip a list and log when its item count query errors', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Broken List', description: 'd1' },
+          },
+          {
+            id: 'f2',
+            list_id: 'list-2',
+            featured_at: '2024-01-02T00:00:00Z',
+            lists: { id: 'list-2', title: 'Fine List', description: 'd2' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        let itemCountCalls = 0;
+        const listItemsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockImplementation(() => {
+            itemCountCalls++;
+            if (itemCountCalls === 1) {
+              return Promise.resolve({ count: null, error: { message: 'RLS denied' } });
+            }
+            return Promise.resolve({ count: 4, error: null });
+          }),
+        };
+        const rankingsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 2, error: null }),
+        };
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return listItemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`unexpected table ${table}`);
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].title).toBe('Fine List');
+        expect(consoleSpy).toHaveBeenCalledWith(
+          'Item count for list list-1 not available:',
+          'RLS denied'
+        );
+        consoleSpy.mockRestore();
+      });
+
+      it('should skip a list and log when its ranking count query errors', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Broken List', description: 'd1' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const listItemsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 4, error: null }),
+        };
+        const rankingsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: null, error: { message: 'timeout' } }),
+        };
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return listItemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`unexpected table ${table}`);
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toEqual([]);
+        expect(consoleSpy).toHaveBeenCalledWith(
+          'Ranking count for list list-1 not available:',
+          'timeout'
+        );
+        consoleSpy.mockRestore();
+      });
+
       it('should not query profiles when no creator ids are present', async () => {
         const featured = [
           {
