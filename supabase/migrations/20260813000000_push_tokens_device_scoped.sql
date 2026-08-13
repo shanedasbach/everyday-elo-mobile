@@ -18,7 +18,10 @@
 --
 -- device_id starts out null for existing rows; Postgres treats multiple
 -- nulls in a unique constraint as distinct, so this doesn't collide with
--- pre-existing data.
+-- pre-existing data. Those pre-migration rows are also never reconciled
+-- (reconcile_device_ownership matches on device_id, which is never null on
+-- the querying side) — harmless, since the next sign-in on that install
+-- generates and persists a device_id, after which it reconciles normally.
 alter table push_tokens add column if not exists device_id text;
 
 alter table push_tokens

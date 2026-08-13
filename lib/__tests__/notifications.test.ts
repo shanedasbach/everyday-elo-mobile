@@ -47,6 +47,7 @@ jest.mock('expo-secure-store', () => ({
 jest.mock('../supabase', () => ({
   supabase: {
     from: jest.fn(),
+    rpc: jest.fn(),
   },
 }));
 
@@ -216,25 +217,20 @@ describe('Notifications module', () => {
   });
 
   describe('reconcileDeviceOwnership', () => {
-    it('deletes rows for this device owned by a different user', async () => {
-      const neq = jest.fn().mockResolvedValue({ error: null });
-      const eq = jest.fn().mockReturnValue({ neq });
-      const del = jest.fn().mockReturnValue({ eq });
-      (supabase.from as jest.Mock).mockReturnValue({ delete: del });
+    it('calls the reconcile_device_ownership RPC for this device', async () => {
+      (supabase.rpc as jest.Mock).mockResolvedValue({ error: null });
 
-      await reconcileDeviceOwnership('user-1', 'device-1');
+      await reconcileDeviceOwnership('device-1');
 
-      expect(supabase.from).toHaveBeenCalledWith('push_tokens');
-      expect(eq).toHaveBeenCalledWith('device_id', 'device-1');
-      expect(neq).toHaveBeenCalledWith('user_id', 'user-1');
+      expect(supabase.rpc).toHaveBeenCalledWith('reconcile_device_ownership', {
+        p_device_id: 'device-1',
+      });
     });
 
-    it('throws when the delete fails', async () => {
-      const neq = jest.fn().mockResolvedValue({ error: { message: 'nope' } });
-      const eq = jest.fn().mockReturnValue({ neq });
-      (supabase.from as jest.Mock).mockReturnValue({ delete: jest.fn().mockReturnValue({ eq }) });
+    it('throws when the RPC fails', async () => {
+      (supabase.rpc as jest.Mock).mockResolvedValue({ error: { message: 'nope' } });
 
-      await expect(reconcileDeviceOwnership('u', 'd')).rejects.toEqual({ message: 'nope' });
+      await expect(reconcileDeviceOwnership('d')).rejects.toEqual({ message: 'nope' });
     });
   });
 
@@ -274,16 +270,15 @@ describe('Notifications module', () => {
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
       (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('device-1');
       const upsert = jest.fn().mockResolvedValue({ error: null });
-      const neq = jest.fn().mockResolvedValue({ error: null });
-      const eq = jest.fn().mockReturnValue({ neq });
-      const del = jest.fn().mockReturnValue({ eq });
-      (supabase.from as jest.Mock).mockReturnValue({ upsert, delete: del });
+      (supabase.from as jest.Mock).mockReturnValue({ upsert });
+      (supabase.rpc as jest.Mock).mockResolvedValue({ error: null });
 
       const result = await registerDeviceForUser('user-1');
 
       expect(result).toBe('tok-ok');
-      expect(eq).toHaveBeenCalledWith('device_id', 'device-1');
-      expect(neq).toHaveBeenCalledWith('user_id', 'user-1');
+      expect(supabase.rpc).toHaveBeenCalledWith('reconcile_device_ownership', {
+        p_device_id: 'device-1',
+      });
       expect(upsert).toHaveBeenCalledWith(
         expect.objectContaining({ user_id: 'user-1', device_id: 'device-1', token: 'tok-ok' }),
         { onConflict: 'user_id,device_id' }
@@ -296,10 +291,8 @@ describe('Notifications module', () => {
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
       (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('device-1');
       const upsert = jest.fn().mockResolvedValue({ error: null });
-      const neq = jest.fn().mockResolvedValue({ error: { message: 'reconcile failed' } });
-      const eq = jest.fn().mockReturnValue({ neq });
-      const del = jest.fn().mockReturnValue({ eq });
-      (supabase.from as jest.Mock).mockReturnValue({ upsert, delete: del });
+      (supabase.from as jest.Mock).mockReturnValue({ upsert });
+      (supabase.rpc as jest.Mock).mockResolvedValue({ error: { message: 'reconcile failed' } });
 
       const result = await registerDeviceForUser('user-1');
 
@@ -312,10 +305,8 @@ describe('Notifications module', () => {
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
       (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('device-1');
       const upsert = jest.fn().mockResolvedValue({ error: { message: 'transient' } });
-      const neq = jest.fn().mockResolvedValue({ error: null });
-      const eq = jest.fn().mockReturnValue({ neq });
-      const del = jest.fn().mockReturnValue({ eq });
-      (supabase.from as jest.Mock).mockReturnValue({ upsert, delete: del });
+      (supabase.from as jest.Mock).mockReturnValue({ upsert });
+      (supabase.rpc as jest.Mock).mockResolvedValue({ error: null });
 
       const result = await registerDeviceForUser('user-1');
 

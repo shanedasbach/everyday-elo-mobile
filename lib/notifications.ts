@@ -130,13 +130,16 @@ export async function removePushToken(userId: string, deviceId: string): Promise
  * changed accounts reconciles even if the previous account's sign-out
  * cleanup silently failed (offline, dropped error) — the exact scenario
  * behind #96.
+ *
+ * Runs via the reconcile_device_ownership RPC (security definer) rather
+ * than a client-side delete: this delete targets a row owned by someone
+ * other than the caller, which this app's RLS mutation policies
+ * (`using (auth.uid() = user_id)`) would otherwise filter down to zero rows.
  */
-export async function reconcileDeviceOwnership(userId: string, deviceId: string): Promise<void> {
-  const { error } = await supabase
-    .from('push_tokens')
-    .delete()
-    .eq('device_id', deviceId)
-    .neq('user_id', userId);
+export async function reconcileDeviceOwnership(deviceId: string): Promise<void> {
+  const { error } = await supabase.rpc('reconcile_device_ownership', {
+    p_device_id: deviceId,
+  });
   if (error) throw error;
 }
 
@@ -197,7 +200,7 @@ export async function registerDeviceForUser(userId: string): Promise<string | nu
   await persistLastPushToken(token);
   const deviceId = await getOrCreateDeviceId();
   try {
-    await reconcileDeviceOwnership(userId, deviceId);
+    await reconcileDeviceOwnership(deviceId);
   } catch {
     // Non-fatal: proceed to claim this device for userId regardless — a
     // later sign-in on this device gets another chance to reconcile.
