@@ -60,6 +60,8 @@ import {
   registerForPushNotificationsAsync,
   savePushToken,
   removePushToken,
+  reconcileDeviceOwnership,
+  getOrCreateDeviceId,
   registerDeviceForUser,
   persistLastPushToken,
   getPersistedPushToken,
@@ -164,16 +166,21 @@ describe('Notifications module', () => {
   });
 
   describe('savePushToken', () => {
-    it('upserts the token with platform metadata', async () => {
+    it('upserts the token keyed on user_id + device_id', async () => {
       const upsert = jest.fn().mockResolvedValue({ error: null });
       (supabase.from as jest.Mock).mockReturnValue({ upsert });
 
-      await savePushToken('user-1', 'tok-1');
+      await savePushToken('user-1', 'tok-1', 'device-1');
 
       expect(supabase.from).toHaveBeenCalledWith('push_tokens');
       expect(upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ user_id: 'user-1', token: 'tok-1', platform: 'ios' }),
-        { onConflict: 'token' }
+        expect.objectContaining({
+          user_id: 'user-1',
+          device_id: 'device-1',
+          token: 'tok-1',
+          platform: 'ios',
+        }),
+        { onConflict: 'user_id,device_id' }
       );
     });
 
@@ -181,27 +188,73 @@ describe('Notifications module', () => {
       const upsert = jest.fn().mockResolvedValue({ error: { message: 'db down' } });
       (supabase.from as jest.Mock).mockReturnValue({ upsert });
 
-      await expect(savePushToken('u', 't')).rejects.toEqual({ message: 'db down' });
+      await expect(savePushToken('u', 't', 'd')).rejects.toEqual({ message: 'db down' });
     });
   });
 
   describe('removePushToken', () => {
-    it('deletes the row keyed by token', async () => {
-      const eq = jest.fn().mockResolvedValue({ error: null });
-      const del = jest.fn().mockReturnValue({ eq });
+    it('deletes the row keyed by user_id + device_id', async () => {
+      const eq2 = jest.fn().mockResolvedValue({ error: null });
+      const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+      const del = jest.fn().mockReturnValue({ eq: eq1 });
       (supabase.from as jest.Mock).mockReturnValue({ delete: del });
 
-      await removePushToken('tok-1');
+      await removePushToken('user-1', 'device-1');
 
       expect(supabase.from).toHaveBeenCalledWith('push_tokens');
-      expect(eq).toHaveBeenCalledWith('token', 'tok-1');
+      expect(eq1).toHaveBeenCalledWith('user_id', 'user-1');
+      expect(eq2).toHaveBeenCalledWith('device_id', 'device-1');
     });
 
     it('throws when the delete fails', async () => {
-      const eq = jest.fn().mockResolvedValue({ error: { message: 'nope' } });
+      const eq2 = jest.fn().mockResolvedValue({ error: { message: 'nope' } });
+      const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+      (supabase.from as jest.Mock).mockReturnValue({ delete: jest.fn().mockReturnValue({ eq: eq1 }) });
+
+      await expect(removePushToken('u', 'd')).rejects.toEqual({ message: 'nope' });
+    });
+  });
+
+  describe('reconcileDeviceOwnership', () => {
+    it('deletes rows for this device owned by a different user', async () => {
+      const neq = jest.fn().mockResolvedValue({ error: null });
+      const eq = jest.fn().mockReturnValue({ neq });
+      const del = jest.fn().mockReturnValue({ eq });
+      (supabase.from as jest.Mock).mockReturnValue({ delete: del });
+
+      await reconcileDeviceOwnership('user-1', 'device-1');
+
+      expect(supabase.from).toHaveBeenCalledWith('push_tokens');
+      expect(eq).toHaveBeenCalledWith('device_id', 'device-1');
+      expect(neq).toHaveBeenCalledWith('user_id', 'user-1');
+    });
+
+    it('throws when the delete fails', async () => {
+      const neq = jest.fn().mockResolvedValue({ error: { message: 'nope' } });
+      const eq = jest.fn().mockReturnValue({ neq });
       (supabase.from as jest.Mock).mockReturnValue({ delete: jest.fn().mockReturnValue({ eq }) });
 
-      await expect(removePushToken('tok')).rejects.toEqual({ message: 'nope' });
+      await expect(reconcileDeviceOwnership('u', 'd')).rejects.toEqual({ message: 'nope' });
+    });
+  });
+
+  describe('getOrCreateDeviceId', () => {
+    it('returns the persisted device id when one exists', async () => {
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('existing-device-id');
+
+      const id = await getOrCreateDeviceId();
+
+      expect(id).toBe('existing-device-id');
+      expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+    });
+
+    it('generates and persists a new device id when none exists', async () => {
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue(null);
+
+      const id = await getOrCreateDeviceId();
+
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(SecureStore.setItemAsync).toHaveBeenCalledWith('push_device_id', id);
     });
   });
 
@@ -216,24 +269,53 @@ describe('Notifications module', () => {
       expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
     });
 
-    it('persists the token locally and remotely, and returns it when registration succeeds', async () => {
+    it('reconciles device ownership, persists the token locally and remotely, and returns it', async () => {
       (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('device-1');
       const upsert = jest.fn().mockResolvedValue({ error: null });
-      (supabase.from as jest.Mock).mockReturnValue({ upsert });
+      const neq = jest.fn().mockResolvedValue({ error: null });
+      const eq = jest.fn().mockReturnValue({ neq });
+      const del = jest.fn().mockReturnValue({ eq });
+      (supabase.from as jest.Mock).mockReturnValue({ upsert, delete: del });
+
+      const result = await registerDeviceForUser('user-1');
+
+      expect(result).toBe('tok-ok');
+      expect(eq).toHaveBeenCalledWith('device_id', 'device-1');
+      expect(neq).toHaveBeenCalledWith('user_id', 'user-1');
+      expect(upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ user_id: 'user-1', device_id: 'device-1', token: 'tok-ok' }),
+        { onConflict: 'user_id,device_id' }
+      );
+      expect(SecureStore.setItemAsync).toHaveBeenCalledWith('last_push_token', 'tok-ok');
+    });
+
+    it('still returns the token when reconciliation fails', async () => {
+      (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
+      (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('device-1');
+      const upsert = jest.fn().mockResolvedValue({ error: null });
+      const neq = jest.fn().mockResolvedValue({ error: { message: 'reconcile failed' } });
+      const eq = jest.fn().mockReturnValue({ neq });
+      const del = jest.fn().mockReturnValue({ eq });
+      (supabase.from as jest.Mock).mockReturnValue({ upsert, delete: del });
 
       const result = await registerDeviceForUser('user-1');
 
       expect(result).toBe('tok-ok');
       expect(upsert).toHaveBeenCalled();
-      expect(SecureStore.setItemAsync).toHaveBeenCalledWith('last_push_token', 'tok-ok');
     });
 
     it('still returns the token when remote persistence fails', async () => {
       (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
       (Notifications.getExpoPushTokenAsync as jest.Mock).mockResolvedValue({ data: 'tok-ok' });
+      (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('device-1');
       const upsert = jest.fn().mockResolvedValue({ error: { message: 'transient' } });
-      (supabase.from as jest.Mock).mockReturnValue({ upsert });
+      const neq = jest.fn().mockResolvedValue({ error: null });
+      const eq = jest.fn().mockReturnValue({ neq });
+      const del = jest.fn().mockReturnValue({ eq });
+      (supabase.from as jest.Mock).mockReturnValue({ upsert, delete: del });
 
       const result = await registerDeviceForUser('user-1');
 

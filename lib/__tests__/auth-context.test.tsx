@@ -1,18 +1,20 @@
 /**
  * Tests for the auth provider's sign-out push-token revocation.
  *
- * Covers issue #85: sign-out must prefer the token persisted at
- * registration time over re-deriving it via a fresh permission check, and
- * must not throw when revocation fails.
+ * Covers #96: sign-out revokes this device's push-token row keyed on
+ * (user_id, device_id) rather than the token itself, and must not throw when
+ * revocation fails.
  */
 
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 
+const sessionUser = { id: 'user-1' };
+
 jest.mock('../supabase', () => ({
   supabase: {
     auth: {
-      getSession: jest.fn().mockResolvedValue({ data: { session: null } }),
+      getSession: jest.fn().mockResolvedValue({ data: { session: { user: sessionUser } } }),
       onAuthStateChange: jest.fn().mockReturnValue({
         data: { subscription: { unsubscribe: jest.fn() } },
       }),
@@ -24,19 +26,13 @@ jest.mock('../supabase', () => ({
 }));
 
 jest.mock('../notifications', () => ({
-  registerForPushNotificationsAsync: jest.fn(),
   removePushToken: jest.fn(),
-  getPersistedPushToken: jest.fn(),
+  getOrCreateDeviceId: jest.fn(),
   clearPersistedPushToken: jest.fn(),
 }));
 
 import { supabase } from '../supabase';
-import {
-  registerForPushNotificationsAsync,
-  removePushToken,
-  getPersistedPushToken,
-  clearPersistedPushToken,
-} from '../notifications';
+import { removePushToken, getOrCreateDeviceId, clearPersistedPushToken } from '../notifications';
 import { AuthProvider, useAuth } from '../auth-context';
 
 function Consumer({ onReady }: { onReady: (ctx: ReturnType<typeof useAuth>) => void }) {
@@ -63,39 +59,24 @@ describe('AuthProvider signOut push-token revocation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (supabase.auth.signOut as jest.Mock).mockResolvedValue({ error: null });
+    (getOrCreateDeviceId as jest.Mock).mockResolvedValue('device-1');
+    (removePushToken as jest.Mock).mockResolvedValue(undefined);
   });
 
-  it('uses the persisted token and clears it, without re-deriving one', async () => {
-    (getPersistedPushToken as jest.Mock).mockResolvedValue('persisted-tok');
-
+  it('removes this device row for the signed-in user and clears the local cache', async () => {
     const ctx = await renderAuth();
     await act(async () => {
       await ctx.signOut();
     });
 
-    expect(registerForPushNotificationsAsync).not.toHaveBeenCalled();
-    expect(removePushToken).toHaveBeenCalledWith('persisted-tok');
+    expect(getOrCreateDeviceId).toHaveBeenCalled();
+    expect(removePushToken).toHaveBeenCalledWith('user-1', 'device-1');
     expect(clearPersistedPushToken).toHaveBeenCalled();
     expect(supabase.auth.signOut).toHaveBeenCalled();
   });
 
-  it('falls back to a fresh token when nothing is persisted', async () => {
-    (getPersistedPushToken as jest.Mock).mockResolvedValue(null);
-    (registerForPushNotificationsAsync as jest.Mock).mockResolvedValue('fresh-tok');
-
-    const ctx = await renderAuth();
-    await act(async () => {
-      await ctx.signOut();
-    });
-
-    expect(registerForPushNotificationsAsync).toHaveBeenCalled();
-    expect(removePushToken).toHaveBeenCalledWith('fresh-tok');
-    expect(clearPersistedPushToken).toHaveBeenCalled();
-  });
-
-  it('does not call removePushToken when no token is available at all', async () => {
-    (getPersistedPushToken as jest.Mock).mockResolvedValue(null);
-    (registerForPushNotificationsAsync as jest.Mock).mockResolvedValue(null);
+  it('does not call removePushToken when there is no signed-in user', async () => {
+    (supabase.auth.getSession as jest.Mock).mockResolvedValueOnce({ data: { session: null } });
 
     const ctx = await renderAuth();
     await act(async () => {
@@ -103,13 +84,13 @@ describe('AuthProvider signOut push-token revocation', () => {
     });
 
     expect(removePushToken).not.toHaveBeenCalled();
-    expect(clearPersistedPushToken).not.toHaveBeenCalled();
+    expect(clearPersistedPushToken).toHaveBeenCalled();
     expect(supabase.auth.signOut).toHaveBeenCalled();
   });
 
   it('logs and still signs out when revocation throws', async () => {
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    (getPersistedPushToken as jest.Mock).mockRejectedValue(new Error('offline'));
+    (getOrCreateDeviceId as jest.Mock).mockRejectedValue(new Error('offline'));
 
     const ctx = await renderAuth();
     await act(async () => {
@@ -126,8 +107,6 @@ describe('AuthProvider signOut push-token revocation', () => {
   });
 
   it('throws when supabase.auth.signOut errors', async () => {
-    (getPersistedPushToken as jest.Mock).mockResolvedValue(null);
-    (registerForPushNotificationsAsync as jest.Mock).mockResolvedValue(null);
     (supabase.auth.signOut as jest.Mock).mockResolvedValue({ error: new Error('boom') });
 
     const ctx = await renderAuth();

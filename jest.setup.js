@@ -9,15 +9,17 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // only that one message so it doesn't drown the test output; everything else
 // still surfaces.
 //
-// Scoped two ways on purpose. It only installs for the component suites that
-// provoke the banner — the lib/ suites never touch react-test-renderer — and it
-// is always restored in afterAll, so the patch cannot outlive the file that
-// needs it or surprise anyone who later spies on console.error.
-const isComponentSuite = /[\\/]components[\\/]__tests__[\\/]/.test(
+// Scoped two ways on purpose. It only installs for suites that actually
+// render via react-test-renderer — matched by file extension, since any
+// __tests__/*.tsx file may render a component or provider tree (not just
+// components/__tests__/ — lib/__tests__/auth-context.test.tsx does too) —
+// and it is always restored in afterAll, so the patch cannot outlive the
+// file that needs it or surprise anyone who later spies on console.error.
+const isRenderSuite = /[\\/]__tests__[\\/][^\\/]+\.tsx$/.test(
   expect.getState().testPath ?? '',
 );
 
-if (isComponentSuite) {
+if (isRenderSuite) {
   let realConsoleError;
   beforeAll(() => {
     realConsoleError = console.error;
