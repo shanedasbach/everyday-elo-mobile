@@ -28,6 +28,7 @@ jest.mock('../notifications', () => ({
   removePushToken: jest.fn(),
   getPersistedPushToken: jest.fn(),
   clearPersistedPushToken: jest.fn(),
+  hasNotificationPermission: jest.fn(),
 }));
 
 import { supabase } from '../supabase';
@@ -36,6 +37,7 @@ import {
   removePushToken,
   getPersistedPushToken,
   clearPersistedPushToken,
+  hasNotificationPermission,
 } from '../notifications';
 import { AuthProvider, useAuth } from '../auth-context';
 
@@ -79,8 +81,9 @@ describe('AuthProvider signOut push-token revocation', () => {
     expect(supabase.auth.signOut).toHaveBeenCalled();
   });
 
-  it('falls back to a fresh token when nothing is persisted', async () => {
+  it('falls back to a fresh token when nothing is persisted but permission is already granted', async () => {
     (getPersistedPushToken as jest.Mock).mockResolvedValue(null);
+    (hasNotificationPermission as jest.Mock).mockResolvedValue(true);
     (registerForPushNotificationsAsync as jest.Mock).mockResolvedValue('fresh-tok');
 
     const ctx = await renderAuth();
@@ -95,6 +98,7 @@ describe('AuthProvider signOut push-token revocation', () => {
 
   it('does not call removePushToken when no token is available at all', async () => {
     (getPersistedPushToken as jest.Mock).mockResolvedValue(null);
+    (hasNotificationPermission as jest.Mock).mockResolvedValue(true);
     (registerForPushNotificationsAsync as jest.Mock).mockResolvedValue(null);
 
     const ctx = await renderAuth();
@@ -102,6 +106,21 @@ describe('AuthProvider signOut push-token revocation', () => {
       await ctx.signOut();
     });
 
+    expect(removePushToken).not.toHaveBeenCalled();
+    expect(clearPersistedPushToken).not.toHaveBeenCalled();
+    expect(supabase.auth.signOut).toHaveBeenCalled();
+  });
+
+  it('does not prompt for permission when nothing is persisted and permission is not already granted', async () => {
+    (getPersistedPushToken as jest.Mock).mockResolvedValue(null);
+    (hasNotificationPermission as jest.Mock).mockResolvedValue(false);
+
+    const ctx = await renderAuth();
+    await act(async () => {
+      await ctx.signOut();
+    });
+
+    expect(registerForPushNotificationsAsync).not.toHaveBeenCalled();
     expect(removePushToken).not.toHaveBeenCalled();
     expect(clearPersistedPushToken).not.toHaveBeenCalled();
     expect(supabase.auth.signOut).toHaveBeenCalled();

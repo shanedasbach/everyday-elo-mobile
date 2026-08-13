@@ -58,6 +58,7 @@ import {
   configureNotificationHandler,
   ensureAndroidChannel,
   registerForPushNotificationsAsync,
+  hasNotificationPermission,
   savePushToken,
   removePushToken,
   registerDeviceForUser,
@@ -160,6 +161,29 @@ describe('Notifications module', () => {
       const token = await registerForPushNotificationsAsync();
 
       expect(token).toBeNull();
+    });
+  });
+
+  describe('hasNotificationPermission', () => {
+    it('returns false on a simulator without checking status', async () => {
+      deviceMock.isDevice = false;
+      const result = await hasNotificationPermission();
+      expect(result).toBe(false);
+      expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+    });
+
+    it('returns true when permission is already granted', async () => {
+      (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
+      const result = await hasNotificationPermission();
+      expect(result).toBe(true);
+      expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+    });
+
+    it('returns false without prompting when permission is not yet granted', async () => {
+      (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'undetermined' });
+      const result = await hasNotificationPermission();
+      expect(result).toBe(false);
+      expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
     });
   });
 

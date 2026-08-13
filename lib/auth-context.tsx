@@ -6,6 +6,7 @@ import {
   removePushToken,
   getPersistedPushToken,
   clearPersistedPushToken,
+  hasNotificationPermission,
 } from './notifications';
 
 interface AuthContextType {
@@ -57,10 +58,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Prefer the token persisted when it was first registered — re-deriving
     // it via registerForPushNotificationsAsync() means a fresh permission
     // check and a network round-trip to Expo's push service, which silently
-    // drops the revocation if the device is offline.
+    // drops the revocation if the device is offline. Only fall back to
+    // re-deriving when permission is already granted — otherwise there's no
+    // token to revoke, and registering would surface a native permission
+    // prompt in the middle of signing out (#94).
     try {
       let token = await getPersistedPushToken();
-      if (!token) {
+      if (!token && (await hasNotificationPermission())) {
         token = await registerForPushNotificationsAsync();
       }
       if (token) {
