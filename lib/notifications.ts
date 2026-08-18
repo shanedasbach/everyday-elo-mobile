@@ -85,20 +85,6 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 }
 
 /**
- * Check whether notification permission is already granted, without
- * prompting. Use this before any path that might otherwise trigger
- * {@link registerForPushNotificationsAsync}'s native permission dialog in a
- * context where prompting would be a surprising UX.
- */
-export async function hasNotificationPermission(): Promise<boolean> {
-  if (!Device.isDevice) {
-    return false;
-  }
-  const { status } = await Notifications.getPermissionsAsync();
-  return status === 'granted';
-}
-
-/**
  * Persist the device's push token for the given user, keyed on
  * (user_id, device_id) rather than the token itself — the token is only
  * stable per app installation, not per physical device+account pairing, so
