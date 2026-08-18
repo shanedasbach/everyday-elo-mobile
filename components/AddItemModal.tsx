@@ -11,6 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import { findDuplicateItemName } from '../lib/duplicate-item-name';
 
 interface AddItemModalProps {
   visible: boolean;
@@ -32,7 +33,7 @@ export default function AddItemModal({ visible, onClose, onAdd, existingItems }:
     }
 
     // Check for duplicates
-    if (existingItems.some(item => item.toLowerCase() === trimmed.toLowerCase())) {
+    if (findDuplicateItemName(trimmed, existingItems)) {
       setError('This item already exists');
       return;
     }
@@ -65,11 +66,20 @@ export default function AddItemModal({ visible, onClose, onAdd, existingItems }:
         
         <View style={styles.sheet}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={handleClose}>
+            <TouchableOpacity
+              onPress={handleClose}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel"
+            >
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
             <Text style={styles.title}>Add Item</Text>
-            <TouchableOpacity onPress={handleAdd}>
+            <TouchableOpacity
+              onPress={handleAdd}
+              accessibilityRole="button"
+              accessibilityLabel="Add item"
+              accessibilityState={{ disabled: !name.trim() }}
+            >
               <Text style={[styles.addText, !name.trim() && styles.addTextDisabled]}>
                 Add
               </Text>
