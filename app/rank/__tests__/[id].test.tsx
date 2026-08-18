@@ -71,6 +71,7 @@ import {
   getRankedItems,
   updateRankedItem,
   persistComparison,
+  generateIdempotencyKey,
   markRankingCompleteAndNotify,
 } from '../../../lib/api';
 import { savePartialRanking } from '../../../lib/partial-ranking';
@@ -87,6 +88,7 @@ const mockSavePartialRanking = savePartialRanking as jest.MockedFunction<typeof 
 const mockGetRankedItems = getRankedItems as jest.MockedFunction<typeof getRankedItems>;
 const mockUpdateRankedItem = updateRankedItem as jest.MockedFunction<typeof updateRankedItem>;
 const mockPersistComparison = persistComparison as jest.MockedFunction<typeof persistComparison>;
+const mockGenerateIdempotencyKey = generateIdempotencyKey as jest.MockedFunction<typeof generateIdempotencyKey>;
 
 const LIST = {
   id: 'list-1',
@@ -536,5 +538,70 @@ describe('RankScreen', () => {
     expect(eq).toHaveBeenCalledWith('id', 'ri-2');
     expect(deleteListItem).toHaveBeenCalledWith('item-2');
     expect(findText(root, 'Mushroom')).toBeUndefined();
+  });
+
+  it('offers retry when persistComparison fails, and Retry replays with the same idempotency key', async () => {
+    mockGetList.mockResolvedValueOnce(LIST);
+    mockCreateRanking.mockResolvedValueOnce(ranking());
+    mockGetListItems.mockResolvedValueOnce(LIST_ITEMS);
+    mockGetRankedItems.mockResolvedValueOnce(RANKED_ITEMS);
+    mockPersistComparison.mockRejectedValueOnce(new Error('boom'));
+
+    const { root } = renderComponent(<RankScreen />);
+    await flush();
+
+    await act(async () => {
+      press(findButton(root, 'Pepperoni'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(RN.Alert.alert).toHaveBeenCalledWith(
+      'Comparison Not Saved',
+      'This comparison could not be saved to your ranking. Retry, or continue and it will be lost.',
+      expect.any(Array)
+    );
+    const [, , buttons] = (RN.Alert.alert as jest.Mock).mock.calls[0];
+    const retry = buttons.find((b: { text: string }) => b.text === 'Retry')!;
+    expect(buttons.find((b: { text: string }) => b.text === 'Dismiss')!.style).toBe('cancel');
+
+    mockPersistComparison.mockResolvedValueOnce(undefined);
+    await act(async () => {
+      retry.onPress?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockPersistComparison).toHaveBeenCalledTimes(2);
+    // The key is generated once in handleChoiceInner and reused by every
+    // Retry attempt, not regenerated per attempt.
+    expect(mockGenerateIdempotencyKey).toHaveBeenCalledTimes(1);
+    const [[firstArgs], [secondArgs]] = mockPersistComparison.mock.calls;
+    expect(secondArgs.idempotencyKey).toBe(firstArgs.idempotencyKey);
+  });
+
+  it('guards against a rapid double-tap firing two persists for the same comparison', async () => {
+    mockGetList.mockResolvedValueOnce(LIST);
+    mockCreateRanking.mockResolvedValueOnce(ranking());
+    mockGetListItems.mockResolvedValueOnce(LIST_ITEMS);
+    mockGetRankedItems.mockResolvedValueOnce(RANKED_ITEMS);
+    mockPersistComparison.mockResolvedValueOnce(undefined);
+
+    const { root } = renderComponent(<RankScreen />);
+    await flush();
+
+    const card = findButton(root, 'Pepperoni');
+    await act(async () => {
+      // Both presses fire synchronously, before either await inside
+      // handleChoice yields — the second must see the guard already set.
+      press(card);
+      press(card);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockPersistComparison).toHaveBeenCalledTimes(1);
+    expect(findText(root, '1 comparisons')).toBeDefined();
   });
 });

@@ -546,13 +546,11 @@ describe('ListDetailScreen', () => {
     expect(mockPush).not.toHaveBeenCalledWith(expect.stringMatching(/^\/list\//));
   });
 
-  it('shows an error alert instead of crashing when a bulk add partially fails', async () => {
+  it('shows an error alert instead of crashing when a bulk add fails', async () => {
     mockGetList.mockResolvedValueOnce(LIST);
     mockGetListItems.mockResolvedValueOnce(ITEMS);
     mockGetUserRankingForList.mockResolvedValueOnce(null);
-    mockAddListItem
-      .mockResolvedValueOnce({ id: 'item-3', list_id: 'list-1', name: 'Olives', display_order: 2, created_at: '2026-01-01' })
-      .mockRejectedValueOnce(new Error('boom'));
+    mockAddListItems.mockRejectedValueOnce(new Error('boom'));
 
     const { root } = renderComponent(<ListDetailScreen />);
     await flush();
@@ -573,10 +571,10 @@ describe('ListDetailScreen', () => {
       await Promise.resolve();
     });
 
+    expect(mockAddListItems).toHaveBeenCalledWith('list-1', ['Olives', 'Anchovies']);
     expect(RN.Alert.alert).toHaveBeenCalledWith('Error', 'Failed to add items');
-    // setItems only runs once the whole loop succeeds, so a failure partway
-    // through means nothing from the batch reaches local state — even though
-    // the first addListItem call already landed server-side.
+    // addListItems is a single atomic insert, so a rejection means nothing
+    // from the batch reaches local state.
     expect(findText(root, 'Olives')).toBeUndefined();
   });
 });
