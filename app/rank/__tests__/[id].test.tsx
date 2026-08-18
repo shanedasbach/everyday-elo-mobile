@@ -57,6 +57,7 @@ jest.mock('../../../lib/api', () => ({
   persistComparison: jest.fn(),
   addListItem: jest.fn(),
   deleteListItem: jest.fn(),
+  generateIdempotencyKey: jest.fn(() => 'test-idempotency-key'),
 }));
 
 import * as RN from '../../../components/__tests__/helpers/rnMock';

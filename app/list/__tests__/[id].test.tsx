@@ -28,6 +28,7 @@ jest.mock('../../../lib/api', () => ({
   getUserRankingForList: jest.fn(),
   deleteList: jest.fn(),
   addListItem: jest.fn(),
+  addListItems: jest.fn(),
   duplicateList: jest.fn(),
   followUser: jest.fn(),
   unfollowUser: jest.fn(),
@@ -45,6 +46,7 @@ import {
   deleteList,
   duplicateList,
   addListItem,
+  addListItems,
   isFollowing,
 } from '../../../lib/api';
 import ListDetailScreen from '../[id]';
@@ -55,6 +57,7 @@ const mockGetListItems = getListItems as jest.MockedFunction<typeof getListItems
 const mockGetRankedItems = getRankedItems as jest.MockedFunction<typeof getRankedItems>;
 const mockGetUserRankingForList = getUserRankingForList as jest.MockedFunction<typeof getUserRankingForList>;
 const mockAddListItem = addListItem as jest.MockedFunction<typeof addListItem>;
+const mockAddListItems = addListItems as jest.MockedFunction<typeof addListItems>;
 const mockDeleteList = deleteList as jest.MockedFunction<typeof deleteList>;
 const mockDuplicateList = duplicateList as jest.MockedFunction<typeof duplicateList>;
 const mockIsFollowing = isFollowing as jest.MockedFunction<typeof isFollowing>;
@@ -409,9 +412,10 @@ describe('ListDetailScreen', () => {
     mockGetList.mockResolvedValueOnce(LIST);
     mockGetListItems.mockResolvedValueOnce(ITEMS);
     mockGetUserRankingForList.mockResolvedValueOnce(null);
-    mockAddListItem
-      .mockResolvedValueOnce({ id: 'item-3', list_id: 'list-1', name: 'Olives', display_order: 2, created_at: '2026-01-01' })
-      .mockResolvedValueOnce({ id: 'item-4', list_id: 'list-1', name: 'Anchovies', display_order: 3, created_at: '2026-01-01' });
+    mockAddListItems.mockResolvedValueOnce([
+      { id: 'item-3', list_id: 'list-1', name: 'Olives', display_order: 2, created_at: '2026-01-01' },
+      { id: 'item-4', list_id: 'list-1', name: 'Anchovies', display_order: 3, created_at: '2026-01-01' },
+    ]);
 
     const { root } = renderComponent(<ListDetailScreen />);
     await flush();
@@ -432,8 +436,7 @@ describe('ListDetailScreen', () => {
       await Promise.resolve();
     });
 
-    expect(mockAddListItem).toHaveBeenNthCalledWith(1, 'list-1', 'Olives');
-    expect(mockAddListItem).toHaveBeenNthCalledWith(2, 'list-1', 'Anchovies');
+    expect(mockAddListItems).toHaveBeenCalledWith('list-1', ['Olives', 'Anchovies']);
     expect(findText(root, 'Olives')).toBeDefined();
     expect(findText(root, 'Anchovies')).toBeDefined();
   });
