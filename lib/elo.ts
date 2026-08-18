@@ -5,6 +5,8 @@
  * Higher K = faster rating changes (good for fewer comparisons)
  */
 
+import { selectNextPairIndices } from './pair-selection';
+
 export interface EloItem {
   id: string;
   name: string;
@@ -108,18 +110,6 @@ export function pairKey(idA: string, idB: string): string {
 }
 
 /**
- * Opponents of `item`, ordered by how close their rating is (closest first).
- */
-function opponentsByRatingDistance(items: EloItem[], item: EloItem): EloItem[] {
-  return items
-    .filter((other) => other.id !== item.id)
-    .sort(
-      (a, b) =>
-        Math.abs(a.rating - item.rating) - Math.abs(b.rating - item.rating)
-    );
-}
-
-/**
  * Select next pair to compare
  * Strategy: Prioritize items with fewer comparisons, then similar ratings,
  * while avoiding matchups the user has already been shown.
@@ -127,38 +117,19 @@ function opponentsByRatingDistance(items: EloItem[], item: EloItem): EloItem[] {
  * `seenPairs` holds keys produced by `pairKey`. The least-compared item that
  * still has an unseen opponent is chosen first; only when every possible
  * matchup has been seen do we fall back to repeating one.
+ *
+ * The strategy itself lives in `lib/pair-selection.ts` — this is the
+ * item-returning view of it, and the rank screen uses the index-returning one.
  */
 export function selectNextPair(
   items: EloItem[],
   seenPairs: ReadonlySet<string> = new Set()
 ): [EloItem, EloItem] | null {
-  if (items.length < 2) return null;
+  const pair = selectNextPairIndices(items, {
+    isSeen: (a, b) => seenPairs.has(pairKey(items[a].id, items[b].id)),
+  });
 
-  // Sort by comparisons (ascending) to prioritize less-compared items
-  const sorted = [...items].sort((a, b) => a.comparisons - b.comparisons);
-
-  // Walk from the least-compared item outward until we find one that still has
-  // an opponent it hasn't been shown against.
-  let first = sorted[0];
-  let pool = opponentsByRatingDistance(items, first);
-
-  for (const candidate of sorted) {
-    const unseen = opponentsByRatingDistance(items, candidate).filter(
-      (other) => !seenPairs.has(pairKey(candidate.id, other.id))
-    );
-    if (unseen.length > 0) {
-      first = candidate;
-      pool = unseen;
-      break;
-    }
-  }
-
-  // Pick randomly from top 3 closest (adds variety)
-  const candidates = pool.slice(0, Math.min(3, pool.length));
-  const second = candidates[Math.floor(Math.random() * candidates.length)];
-
-  // Randomize order so there's no position bias
-  return Math.random() > 0.5 ? [first, second] : [second, first];
+  return pair && [items[pair[0]], items[pair[1]]];
 }
 
 /**

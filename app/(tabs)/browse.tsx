@@ -1,17 +1,34 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, RefreshControl, ActivityIndicator } from 'react-native';
 import { Link } from 'expo-router';
-import { getTemplateLists, getFeaturedLists, FeaturedList, List } from '../../lib/api';
+import {
+  getTemplateLists,
+  getFeaturedLists,
+  getFollowedListsFeed,
+  FeaturedList,
+  FollowedListFeedEntry,
+  List,
+} from '../../lib/api';
 import { templates as fallbackTemplates, Template } from '../../lib/templates';
+import { useAuth } from '../../lib/auth-context';
 
 type Tab = 'for-you' | 'following';
 
 export default function BrowseScreen() {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('for-you');
   const [templates, setTemplates] = useState<Template[]>(fallbackTemplates);
   const [featuredLists, setFeaturedLists] = useState<FeaturedList[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [feed, setFeed] = useState<FollowedListFeedEntry[]>([]);
+  const [followingCount, setFollowingCount] = useState(0);
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [feedError, setFeedError] = useState(false);
+  const [feedRefreshing, setFeedRefreshing] = useState(false);
+  // Cancels whichever feed fetch is currently in flight, whoever started it —
+  // the mount effect, pull-to-refresh, or the error screen's retry button.
+  const cancelFeedFetch = useRef<(() => void) | null>(null);
 
   const loadData = async () => {
     try {
@@ -44,6 +61,62 @@ export default function BrowseScreen() {
   const onRefresh = () => {
     setRefreshing(true);
     loadData();
+  };
+
+  const loadFeed = useCallback(() => {
+    // A newer fetch always wins. Without this, tabbing away and back starts a
+    // second fetch, and the first one rejecting afterwards paints the error
+    // screen over the good data the second one just loaded.
+    cancelFeedFetch.current?.();
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+    };
+    cancelFeedFetch.current = cancel;
+
+    if (!user) {
+      setFeed([]);
+      setFollowingCount(0);
+      setFeedError(false);
+      setFeedLoading(false);
+      setFeedRefreshing(false);
+      return cancel;
+    }
+
+    setFeedError(false);
+    getFollowedListsFeed(user.id)
+      .then((result) => {
+        if (cancelled) return;
+        setFeed(result.entries);
+        setFollowingCount(result.following_count);
+      })
+      .catch(() => {
+        // An empty feed and a failed fetch are different things to a user.
+        if (!cancelled) setFeedError(true);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setFeedLoading(false);
+        setFeedRefreshing(false);
+      });
+
+    return cancel;
+  }, [user]);
+
+  // Fetch lazily: only once the Following tab is actually opened.
+  useEffect(() => {
+    if (activeTab === 'following') {
+      setFeedLoading(true);
+      loadFeed();
+    }
+    // Cancels the latest fetch regardless of which caller started it, so a
+    // retry's read is guarded on unmount just like the initial one.
+    return () => cancelFeedFetch.current?.();
+  }, [activeTab, loadFeed]);
+
+  const onRefreshFeed = () => {
+    setFeedRefreshing(true);
+    loadFeed();
   };
 
   const groupedFeatured = featuredLists.reduce((acc, list) => {
@@ -166,14 +239,99 @@ export default function BrowseScreen() {
             </>
           )}
         </ScrollView>
-      ) : (
+      ) : !user ? (
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyIcon}>👥</Text>
-          <Text style={styles.emptyTitle}>No one to follow yet</Text>
+          <Text style={styles.emptyTitle}>Sign in to follow people</Text>
           <Text style={styles.emptyText}>
-            Following is coming soon. Once you follow other users, their ranked lists will appear here.
+            Once you sign in and follow other users, their ranked lists will appear here.
           </Text>
         </View>
+      ) : feedLoading ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator color="#3B82F6" size="large" />
+        </View>
+      ) : feedError ? (
+        <View style={styles.emptyContainer}>
+          <Text style={styles.emptyIcon}>⚠️</Text>
+          <Text style={styles.emptyTitle}>Couldn&apos;t load your feed</Text>
+          <Text style={styles.emptyText}>Check your connection and try again.</Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={() => {
+              setFeedLoading(true);
+              loadFeed();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading feed"
+          >
+            <Text style={styles.retryButtonText}>Try again</Text>
+          </TouchableOpacity>
+        </View>
+      ) : feed.length === 0 ? (
+        // An empty feed means one of two unrelated things, and telling a user
+        // who just followed someone that they follow nobody reads as a bug in
+        // the follow button. `following_count` tells them apart.
+        followingCount === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyIcon}>👥</Text>
+            <Text style={styles.emptyTitle}>No one to follow yet</Text>
+            <Text style={styles.emptyText}>
+              Once you follow other users, their ranked lists will appear here.
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyIcon}>🕓</Text>
+            <Text style={styles.emptyTitle}>Nothing new yet</Text>
+            <Text style={styles.emptyText}>
+              The people you follow haven&apos;t finished a ranking yet. Their lists will
+              show up here when they do.
+            </Text>
+          </View>
+        )
+      ) : (
+        <ScrollView
+          style={styles.container}
+          refreshControl={
+            <RefreshControl refreshing={feedRefreshing} onRefresh={onRefreshFeed} />
+          }
+        >
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>👥 From people you follow</Text>
+            <Text style={styles.sectionSubtitle}>Recently updated rankings</Text>
+
+            {feed.map((entry) => (
+              <Link key={entry.ranking_id} href={`/rank/${entry.list_id}`} asChild>
+                <TouchableOpacity style={styles.featuredCard}>
+                  <Text style={styles.featuredTitle}>{entry.title}</Text>
+                  {entry.description && (
+                    <Text style={styles.featuredDescription} numberOfLines={2}>
+                      {entry.description}
+                    </Text>
+                  )}
+                  <View style={styles.featuredMeta}>
+                    <Text style={styles.featuredStat}>
+                      ⚖️ {entry.comparisons_count} comparisons
+                    </Text>
+                    <Text style={styles.featuredStat}>
+                      🕒 {new Date(entry.updated_at).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  {/* "ranked by", not "by" — the For You tab uses this same
+                      style for a list's creator, and the ranker is usually
+                      someone else. */}
+                  {(entry.ranker_name || entry.ranker_username) && (
+                    <Text style={styles.featuredCreator}>
+                      ranked by {entry.ranker_name || `@${entry.ranker_username}`}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </Link>
+            ))}
+          </View>
+          <View style={styles.spacer} />
+        </ScrollView>
       )}
     </View>
   );
@@ -363,5 +521,18 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     textAlign: 'center',
     lineHeight: 22,
+  },
+  retryButton: {
+    marginTop: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#3B82F6',
+  },
+  retryButtonText: {
+    color: '#3B82F6',
+    fontWeight: '600',
+    fontSize: 15,
   },
 });

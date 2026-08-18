@@ -8,7 +8,8 @@ import {
 } from 'react-native-gesture-handler';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import { expectedScore, K_FACTOR, pairKey } from '../../lib/elo';
+import { calculateNewRatings, pairKey } from '../../lib/elo';
+import { selectNextPairIndices } from '../../lib/pair-selection';
 import {
   SWIPE_THRESHOLD,
   commitTranslation,
@@ -26,10 +27,11 @@ import {
   createRanking,
   getRankedItems,
   updateRankedItem,
-  incrementComparisonsCount,
   markRankingComplete,
   markRankingCompleteAndNotify,
-  recordComparison,
+  persistComparison,
+  PersistComparisonArgs,
+  generateIdempotencyKey,
   addListItem,
   deleteListItem,
   List,
@@ -84,6 +86,10 @@ export default function RankScreen() {
   const lastTranslationA = useRef(0);
   const lastTranslationB = useRef(0);
   const isAnimatingOut = useRef(false);
+
+  // Guards handleChoice against a rapid double-tap/double-swipe firing two
+  // persists for the same comparison before the first one resolves.
+  const isProcessingChoice = useRef(false);
 
   useEffect(() => {
     loadList();
@@ -193,73 +199,60 @@ export default function RankScreen() {
   };
 
   const selectNextPair = (items: LocalRankedItem[], skipObvious: boolean = false) => {
-    if (items.length < 2) return;
+    const pair = selectNextPairIndices(items, {
+      isSeen: (a, b) => seenPairs.current.has(pairKey(items[a].itemId, items[b].itemId)),
+      skipObvious,
+    });
 
-    // Sort by comparisons (prioritize less-compared items)
-    const sorted = [...items].map((item, index) => ({ ...item, originalIndex: index }))
-      .sort((a, b) => a.comparisons - b.comparisons);
+    if (pair) {
+      setCurrentPair(pair);
+    }
+  };
 
-    type Indexed = (typeof sorted)[number];
-
-    // Opponents of `item`, closest rating first.
-    const opponentsOf = (item: Indexed): Indexed[] =>
-      sorted
-        .filter(o => o.originalIndex !== item.originalIndex)
-        .sort((a, b) =>
-          Math.abs(a.rating - item.rating) - Math.abs(b.rating - item.rating)
-        );
-
-    // Walk out from the least-compared item until we find one that still has a
-    // matchup the user hasn't seen. Avoiding repeats is a hard constraint;
-    // express mode is a soft preference applied within the unseen pool.
-    let first = sorted[0];
-    let others = opponentsOf(first);
-
-    for (const candidate of sorted) {
-      const unseen = opponentsOf(candidate).filter(
-        o => !seenPairs.current.has(pairKey(candidate.itemId, o.itemId))
+  // Local state has already moved on by the time this runs (handleChoice
+  // updates ratings optimistically before persisting), so a swallowed
+  // failure here is invisible: the app shows a rating the database never
+  // recorded. Surface it and let the user retry the exact same write rather
+  // than silently losing it.
+  const persistComparisonWithRetry = async (persistArgs: PersistComparisonArgs): Promise<void> => {
+    try {
+      await persistComparison(persistArgs);
+    } catch (error) {
+      console.error('Failed to save comparison:', error);
+      Alert.alert(
+        'Comparison Not Saved',
+        'This comparison could not be saved to your ranking. Retry, or continue and it will be lost.',
+        [
+          { text: 'Retry', onPress: () => persistComparisonWithRetry(persistArgs) },
+          { text: 'Dismiss', style: 'cancel' },
+        ]
       );
-      if (unseen.length > 0) {
-        first = candidate;
-        others = unseen;
-        break;
-      }
-    }
-
-    // Express mode: filter out very lopsided matchups (rating diff > 200)
-    if (skipObvious && others.length > 1) {
-      const closeOthers = others.filter(o => Math.abs(o.rating - first.rating) < 200);
-      if (closeOthers.length > 0) {
-        others = closeOthers;
-      }
-    }
-
-    // Pick from top 3 closest
-    const candidates = others.slice(0, Math.min(3, others.length));
-    const second = candidates[Math.floor(Math.random() * candidates.length)];
-
-    // Randomize order
-    if (Math.random() > 0.5) {
-      setCurrentPair([first.originalIndex, second.originalIndex]);
-    } else {
-      setCurrentPair([second.originalIndex, first.originalIndex]);
     }
   };
 
   const handleChoice = async (winnerIdx: number, loserIdx: number) => {
+    if (isProcessingChoice.current) return;
+    isProcessingChoice.current = true;
+    try {
+      await handleChoiceInner(winnerIdx, loserIdx);
+    } finally {
+      isProcessingChoice.current = false;
+    }
+  };
+
+  const handleChoiceInner = async (winnerIdx: number, loserIdx: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    
+
     const winner = rankedItems[winnerIdx];
     const loser = rankedItems[loserIdx];
 
     // Remember this matchup so it isn't surfaced again while unseen ones remain.
     seenPairs.current.add(pairKey(winner.itemId, loser.itemId));
 
-    const expectedWinner = expectedScore(winner.rating, loser.rating);
-    const expectedLoser = expectedScore(loser.rating, winner.rating);
-    
-    const newWinnerRating = Math.round(winner.rating + K_FACTOR * (1 - expectedWinner));
-    const newLoserRating = Math.round(loser.rating + K_FACTOR * (0 - expectedLoser));
+    const { winnerRating: newWinnerRating, loserRating: newLoserRating } = calculateNewRatings(
+      winner,
+      loser
+    );
 
     // Update state
     const newItems = [...rankedItems];
@@ -279,14 +272,25 @@ export default function RankScreen() {
 
     // Update Supabase if online
     if (!useOfflineMode && rankingId) {
-      try {
-        await updateRankedItem(winner.id, newWinnerRating, winner.comparisons + 1);
-        await updateRankedItem(loser.id, newLoserRating, loser.comparisons + 1);
-        await incrementComparisonsCount(rankingId);
-        await recordComparison(rankingId, winner.itemId, loser.itemId, winner.itemId);
-      } catch (error) {
-        console.error('Failed to save comparison:', error);
-      }
+      await persistComparisonWithRetry({
+        rankingId,
+        winner: {
+          rankedItemId: winner.id,
+          itemId: winner.itemId,
+          rating: newWinnerRating,
+          comparisons: winner.comparisons + 1,
+        },
+        loser: {
+          rankedItemId: loser.id,
+          itemId: loser.itemId,
+          rating: newLoserRating,
+          comparisons: loser.comparisons + 1,
+        },
+        // Generated once here and reused by every Retry attempt below, so a
+        // response that was actually committed but never acked back to the
+        // client collapses to a no-op on replay instead of double-applying.
+        idempotencyKey: generateIdempotencyKey(),
+      });
     } else if (useOfflineMode && id) {
       // Persist offline/template progress after each comparison so save & exit
       // (including unexpected backgrounding) resumes from the latest state.
