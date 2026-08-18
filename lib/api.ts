@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { clearPartialRanking } from './partial-ranking';
+import { estimateComparisonsNeeded } from './elo';
 
 // Types
 export interface List {
@@ -183,9 +184,9 @@ export async function getList(id: string): Promise<List | null> {
     .from('lists')
     .select('*')
     .eq('id', id)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -194,9 +195,9 @@ export async function getListByShareCode(code: string): Promise<List | null> {
     .from('lists')
     .select('*')
     .eq('share_code', code)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -259,7 +260,7 @@ export async function getUserListsWithStatus(userId: string): Promise<ListWithSt
       itemCount,
       rankingStatus: status,
       comparisonsCount,
-      estimatedComparisons: itemCount * 2,
+      estimatedComparisons: estimateComparisonsNeeded(itemCount),
     };
   });
 }
@@ -317,16 +318,26 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     if (!list) continue;
 
     // Get item count
-    const { count: itemCount } = await supabase
+    const { count: itemCount, error: itemCountError } = await supabase
       .from('list_items')
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
 
+    if (itemCountError) {
+      console.log(`Item count for list ${list.id} not available:`, itemCountError.message);
+      continue;
+    }
+
     // Get ranking count
-    const { count: rankingCount } = await supabase
+    const { count: rankingCount, error: rankingCountError } = await supabase
       .from('rankings')
       .select('id', { count: 'exact', head: true })
       .eq('list_id', list.id);
+
+    if (rankingCountError) {
+      console.log(`Ranking count for list ${list.id} not available:`, rankingCountError.message);
+      continue;
+    }
 
     if (list.creator_id) {
       creatorIdByListId.set(list.id, list.creator_id);
@@ -475,13 +486,14 @@ export async function deleteListItem(id: string): Promise<void> {
 export async function createRanking(listId: string, userId?: string): Promise<Ranking> {
   // Check for existing ranking
   if (userId) {
-    const { data: existing } = await supabase
+    const { data: existing, error: existingError } = await supabase
       .from('rankings')
       .select('*')
       .eq('list_id', listId)
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
 
+    if (existingError) throw existingError;
     if (existing) return existing;
   }
 
@@ -520,9 +532,9 @@ export async function getRanking(id: string): Promise<Ranking | null> {
     .from('rankings')
     .select('*')
     .eq('id', id)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -532,9 +544,9 @@ export async function getUserRankingForList(listId: string, userId: string): Pro
     .select('*')
     .eq('list_id', listId)
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -546,9 +558,9 @@ export async function getCompletedRankingForList(listId: string): Promise<Rankin
     .eq('is_complete', true)
     .order('updated_at', { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
 
-  if (error) return null;
+  if (error) throw error;
   return data;
 }
 
@@ -572,16 +584,6 @@ export async function updateRankedItem(
     .from('ranked_items')
     .update({ rating, comparisons })
     .eq('id', id);
-
-  if (error) throw error;
-}
-
-export async function incrementComparisonsCount(rankingId: string): Promise<void> {
-  // Atomic increment via RPC — see supabase/migrations/20260523000000_increment_comparisons_count.sql.
-  // A read-then-update would race when concurrent comparisons land on the same ranking.
-  const { error } = await supabase.rpc('increment_comparisons_count', {
-    p_ranking_id: rankingId,
-  });
 
   if (error) throw error;
 }
@@ -648,6 +650,108 @@ export async function recordComparison(
     });
 
   if (error) throw error;
+}
+
+// One side of a comparison. Grouping the four fields per side keeps
+// rankedItemId (a ranked_items row) and itemId (a list_items row) from being
+// transposable at the call site — they are both strings, and swapping them
+// would silently update the wrong row and record the wrong winner.
+export interface ComparisonSide {
+  rankedItemId: string;
+  itemId: string;
+  rating: number;
+  comparisons: number;
+}
+
+export interface PersistComparisonArgs {
+  rankingId: string;
+  winner: ComparisonSide;
+  loser: ComparisonSide;
+  idempotencyKey: string;
+}
+
+// A fresh token identifying one logical comparison write. Callers generate
+// this once per write and must reuse the same value across retries of that
+// same write — record_comparison uses it to collapse a retried call into a
+// no-op instead of double-applying the count increment and audit-log insert.
+// Not a cryptographic UUID: uniqueness within this device's session is all
+// the dedup constraint needs.
+export function generateIdempotencyKey(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Applies both ranked_items updates, the comparisons_count increment, and
+// the comparisons insert in a single database transaction — see
+// supabase/migrations/20260805000000_atomic_record_comparison.sql. A partial
+// failure can no longer leave ranked_items desynced from the comparisons
+// audit log, because there is exactly one round-trip: either the server
+// commits all four writes or none of them land.
+//
+// `winner`/`loser` are optional so this also serves persistSkippedComparison
+// below, which has no rating change to make.
+async function recordComparisonAtomic(args: {
+  rankingId: string;
+  itemAId: string;
+  itemBId: string;
+  winnerItemId: string | null;
+  winner: { rankedItemId: string; rating: number; comparisons: number } | null;
+  loser: { rankedItemId: string; rating: number; comparisons: number } | null;
+  idempotencyKey: string;
+}): Promise<void> {
+  const { error } = await supabase.rpc('record_comparison', {
+    p_ranking_id: args.rankingId,
+    p_item_a_id: args.itemAId,
+    p_item_b_id: args.itemBId,
+    p_winner_item_id: args.winnerItemId,
+    p_winner_ranked_item_id: args.winner?.rankedItemId ?? null,
+    p_winner_rating: args.winner?.rating ?? null,
+    p_winner_comparisons: args.winner?.comparisons ?? null,
+    p_loser_ranked_item_id: args.loser?.rankedItemId ?? null,
+    p_loser_rating: args.loser?.rating ?? null,
+    p_loser_comparisons: args.loser?.comparisons ?? null,
+    p_idempotency_key: args.idempotencyKey,
+  });
+
+  if (error) throw error;
+}
+
+export async function persistComparison(args: PersistComparisonArgs): Promise<void> {
+  await recordComparisonAtomic({
+    rankingId: args.rankingId,
+    itemAId: args.winner.itemId,
+    itemBId: args.loser.itemId,
+    winnerItemId: args.winner.itemId,
+    winner: {
+      rankedItemId: args.winner.rankedItemId,
+      rating: args.winner.rating,
+      comparisons: args.winner.comparisons,
+    },
+    loser: {
+      rankedItemId: args.loser.rankedItemId,
+      rating: args.loser.rating,
+      comparisons: args.loser.comparisons,
+    },
+    idempotencyKey: args.idempotencyKey,
+  });
+}
+
+// A skipped matchup: recorded with a null winner and no rating change, via
+// the same atomic path as a decided comparison.
+export async function persistSkippedComparison(args: {
+  rankingId: string;
+  itemAId: string;
+  itemBId: string;
+  idempotencyKey: string;
+}): Promise<void> {
+  await recordComparisonAtomic({
+    rankingId: args.rankingId,
+    itemAId: args.itemAId,
+    itemBId: args.itemBId,
+    winnerItemId: null,
+    winner: null,
+    loser: null,
+    idempotencyKey: args.idempotencyKey,
+  });
 }
 
 // ============================================

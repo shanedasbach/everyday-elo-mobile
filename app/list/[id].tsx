@@ -22,13 +22,14 @@ import {
   getListByShareCode,
   getListItems,
   getRankedItems,
+  getUserRankingForList,
   deleteList,
   addListItem,
+  addListItems,
   duplicateList,
   List,
   ListItem,
 } from '../../lib/api';
-import { supabase } from '../../lib/supabase';
 
 interface RankedListItem extends ListItem {
   rating?: number;
@@ -71,12 +72,7 @@ export default function ListDetailScreen() {
       
       // Check if user has ranked this list
       if (user) {
-        const { data: ranking } = await supabase
-          .from('rankings')
-          .select('*')
-          .eq('list_id', listData.id)
-          .eq('user_id', user.id)
-          .single();
+        const ranking = await getUserRankingForList(listData.id, user.id);
 
         if (ranking) {
           setRankingStatus(ranking.is_complete ? 'completed' : 'in_progress');
@@ -197,14 +193,10 @@ export default function ListDetailScreen() {
 
   const handleBulkAdd = async (names: string[]) => {
     if (!list) return;
-    
+
     try {
-      const newItems: RankedListItem[] = [];
-      for (const name of names) {
-        const newItem = await addListItem(list.id, name);
-        newItems.push({ ...newItem, rank: undefined, rating: undefined });
-      }
-      setItems([...items, ...newItems]);
+      const newItems = await addListItems(list.id, names);
+      setItems([...items, ...newItems.map(item => ({ ...item, rank: undefined, rating: undefined }))]);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
       console.error('Failed to add items:', error);

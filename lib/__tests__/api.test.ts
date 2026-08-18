@@ -57,10 +57,12 @@ import {
   getCompletedRankingForList,
   getRankedItems,
   updateRankedItem,
-  incrementComparisonsCount,
+  persistSkippedComparison,
   markRankingComplete,
   markRankingCompleteAndNotify,
   recordComparison,
+  persistComparison,
+  generateIdempotencyKey,
   getFeaturedLists,
   duplicateList,
   followUser,
@@ -94,6 +96,8 @@ describe('API Module', () => {
       delete: jest.fn().mockReturnThis(),
       eq: jest.fn().mockReturnThis(),
       single: jest.fn().mockResolvedValue(result),
+      // Read-or-null helpers use .maybeSingle(); insert-then-select uses .single().
+      maybeSingle: jest.fn().mockResolvedValue(result),
       order: jest.fn().mockResolvedValue(result),
       limit: jest.fn().mockResolvedValue(result),
     };
@@ -279,6 +283,9 @@ describe('API Module', () => {
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockResolvedValue({ data: [] }),
+          // getList reads through .maybeSingle(); createList's insert-then-select
+          // still terminates on .single().
+          maybeSingle: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
           single: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
         };
         // getListItems uses order() as its terminal call
@@ -322,11 +329,21 @@ describe('API Module', () => {
       });
 
       it('should return null when list does not exist', async () => {
-        mockQuery({ data: null, error: { code: 'PGRST116' } });
+        // .maybeSingle() reports "no rows" as data: null with no error at all,
+        // so a missing list is distinguishable from a failed query.
+        const chain = mockQuery({ data: null, error: null });
 
         const result = await getList('nonexistent-id');
 
         expect(result).toBeNull();
+        expect(chain.maybeSingle).toHaveBeenCalled();
+        expect(chain.single).not.toHaveBeenCalled();
+      });
+
+      it('should throw when the lookup fails for a real reason', async () => {
+        mockQuery({ data: null, error: { message: 'RLS denied' } });
+
+        await expect(getList('list-123')).rejects.toEqual({ message: 'RLS denied' });
       });
     });
 
@@ -340,11 +357,19 @@ describe('API Module', () => {
       });
 
       it('should return null for invalid share code', async () => {
-        mockQuery({ data: null, error: { code: 'PGRST116' } });
+        const chain = mockQuery({ data: null, error: null });
 
         const result = await getListByShareCode('invalid-code');
 
         expect(result).toBeNull();
+        expect(chain.maybeSingle).toHaveBeenCalled();
+        expect(chain.single).not.toHaveBeenCalled();
+      });
+
+      it('should throw when the lookup fails for a real reason', async () => {
+        mockQuery({ data: null, error: { message: 'network down' } });
+
+        await expect(getListByShareCode('share123')).rejects.toEqual({ message: 'network down' });
       });
     });
   });
@@ -701,21 +726,19 @@ describe('API Module', () => {
           { id: 'item-2', display_order: 1 },
         ];
 
-        let singleCalls = 0;
+        let orderCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
-          order: jest
-            .fn()
-            .mockImplementation(() => Promise.resolve({ data: listItems, error: null })),
-          single: jest.fn().mockImplementation(() => {
-            singleCalls++;
-            if (singleCalls === 1) {
-              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
-            }
-            return Promise.resolve({ data: newRanking, error: null });
+          order: jest.fn().mockImplementation(() => {
+            orderCalls++;
+            return Promise.resolve({ data: listItems, error: null });
           }),
+          // The existing-ranking probe is .maybeSingle(); the insert's
+          // .select().single() is a separate mock, so no call counter is needed.
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          single: jest.fn().mockResolvedValue({ data: newRanking, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -742,19 +765,13 @@ describe('API Module', () => {
           updated_at: '',
         };
 
-        let singleCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockResolvedValue({ data: [], error: null }),
-          single: jest.fn().mockImplementation(() => {
-            singleCalls++;
-            if (singleCalls === 1) {
-              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
-            }
-            return Promise.resolve({ data: newRanking, error: null });
-          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          single: jest.fn().mockResolvedValue({ data: newRanking, error: null }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
@@ -776,26 +793,21 @@ describe('API Module', () => {
         };
         const listItems = [{ id: 'item-1', display_order: 0 }];
 
-        let singleCalls = 0;
         let insertCalls = 0;
         const chain: {
           select: jest.Mock;
           insert: jest.Mock;
           eq: jest.Mock;
           order: jest.Mock;
+          maybeSingle: jest.Mock;
           single: jest.Mock;
         } = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockResolvedValue({ data: listItems, error: null }),
-          single: jest.fn().mockImplementation(() => {
-            singleCalls++;
-            if (singleCalls === 1) {
-              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
-            }
-            return Promise.resolve({ data: newRanking, error: null });
-          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          single: jest.fn().mockResolvedValue({ data: newRanking, error: null }),
         };
         chain.insert.mockImplementation(() => {
           insertCalls++;
@@ -838,23 +850,34 @@ describe('API Module', () => {
       });
 
       it('should throw error when ranking insert fails', async () => {
-        let singleCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockResolvedValue({ data: [], error: null }),
-          single: jest.fn().mockImplementation(() => {
-            singleCalls++;
-            if (singleCalls === 1) {
-              return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
-            }
-            return Promise.resolve({ data: null, error: { message: 'Insert failed' } });
-          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+          single: jest.fn().mockResolvedValue({ data: null, error: { message: 'Insert failed' } }),
         };
         (mockSupabase.from as jest.Mock).mockReturnValue(chain);
 
         await expect(createRanking('list-1', 'user-1')).rejects.toEqual({ message: 'Insert failed' });
+      });
+
+      it('should throw rather than create a duplicate when the existing-ranking probe fails', async () => {
+        // Swallowing this error would resume-as-create: a user with a ranking
+        // they cannot currently read gets a second, empty one.
+        const chain = {
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          order: jest.fn().mockResolvedValue({ data: [], error: null }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } }),
+          single: jest.fn(),
+        };
+        (mockSupabase.from as jest.Mock).mockReturnValue(chain);
+
+        await expect(createRanking('list-1', 'user-1')).rejects.toEqual({ message: 'RLS denied' });
+        expect(chain.insert).not.toHaveBeenCalled();
       });
     });
 
@@ -875,11 +898,19 @@ describe('API Module', () => {
       });
 
       it('should return null when not found', async () => {
-        mockQuery({ data: null, error: { code: 'PGRST116' } });
+        const chain = mockQuery({ data: null, error: null });
 
         const result = await getRanking('nonexistent');
 
         expect(result).toBeNull();
+        expect(chain.maybeSingle).toHaveBeenCalled();
+        expect(chain.single).not.toHaveBeenCalled();
+      });
+
+      it('should throw when the lookup fails for a real reason', async () => {
+        mockQuery({ data: null, error: { message: 'RLS denied' } });
+
+        await expect(getRanking('ranking-123')).rejects.toEqual({ message: 'RLS denied' });
       });
     });
 
@@ -1086,35 +1117,132 @@ describe('API Module', () => {
   });
 
   // ============================================
-  // USE CASE 6: Incrementing Comparison Count
+  // USE CASE 6b: Persisting a full comparison (single atomic RPC)
   // ============================================
-  describe('Incrementing Comparison Count', () => {
-    it('should call the increment_comparisons_count RPC with the ranking id', async () => {
+  describe('Persisting a full comparison', () => {
+    const args = {
+      rankingId: 'ranking-1',
+      winner: {
+        rankedItemId: 'ri-winner',
+        itemId: 'item-winner',
+        rating: 1520,
+        comparisons: 3,
+      },
+      loser: {
+        rankedItemId: 'ri-loser',
+        itemId: 'item-loser',
+        rating: 1480,
+        comparisons: 2,
+      },
+      idempotencyKey: 'token-1',
+    };
+
+    it('applies both rating updates, the count increment, and the comparison insert via one RPC call', async () => {
       (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
 
-      await incrementComparisonsCount('ranking-1');
+      await persistComparison(args);
 
+      // Exactly one round-trip — the server applies all four effects inside
+      // record_comparison's own transaction, so there is no partial-write
+      // window on the client side at all.
       expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
-      expect(mockSupabase.rpc).toHaveBeenCalledWith('increment_comparisons_count', {
-        p_ranking_id: 'ranking-1',
+      expect(mockSupabase.rpc).toHaveBeenCalledWith('record_comparison', {
+        p_ranking_id: args.rankingId,
+        p_item_a_id: args.winner.itemId,
+        p_item_b_id: args.loser.itemId,
+        p_winner_item_id: args.winner.itemId,
+        p_winner_ranked_item_id: args.winner.rankedItemId,
+        p_winner_rating: args.winner.rating,
+        p_winner_comparisons: args.winner.comparisons,
+        p_loser_ranked_item_id: args.loser.rankedItemId,
+        p_loser_rating: args.loser.rating,
+        p_loser_comparisons: args.loser.comparisons,
+        p_idempotency_key: args.idempotencyKey,
       });
-      // No table-level read or update — the RPC does both atomically server-side.
+
+      // No direct table writes — everything goes through the RPC.
       expect(mockSupabase.from).not.toHaveBeenCalled();
     });
 
-    it('should resolve when the ranking does not exist (RPC is idempotent)', async () => {
-      // A missing ranking is not an error from the RPC's perspective — the
-      // UPDATE simply affects zero rows. We still expect the helper to resolve.
-      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
-
-      await expect(incrementComparisonsCount('nonexistent')).resolves.toBeUndefined();
-    });
-
-    it('should surface RPC errors instead of swallowing them', async () => {
-      const rpcError = { message: 'RLS denied', code: '42501' };
+    it('surfaces the RPC error instead of swallowing it, and makes no other write', async () => {
+      // Simulates the server rolling back the whole transaction (e.g. an FK
+      // violation partway through record_comparison): from the client's
+      // perspective this is a single failed call, not a partial success —
+      // there is nothing here to leave ranked_items and comparisons out of
+      // sync, because only one round-trip was ever made.
+      const rpcError = { message: 'insert or update violates foreign key constraint' };
       (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: rpcError });
 
-      await expect(incrementComparisonsCount('ranking-1')).rejects.toEqual(rpcError);
+      await expect(persistComparison(args)).rejects.toEqual(rpcError);
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
+      expect(mockSupabase.from).not.toHaveBeenCalled();
+    });
+
+    it('replays the same idempotency key on retry, so a repeated call is a no-op on the server rather than a second write', async () => {
+      // The client can't tell "the RPC truly failed" apart from "it
+      // committed but the ack was lost," so the only safe client-side
+      // behavior on failure is: retry with the exact same token. This
+      // asserts persistComparison holds up its half of that contract — it
+      // forwards whatever key it was given rather than minting a fresh one
+      // per call, which is what lets record_comparison's client_token
+      // dedup (supabase/migrations/20260805000000_atomic_record_comparison.sql)
+      // collapse the retry into a no-op server-side.
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
+
+      await persistComparison(args);
+      await persistComparison(args);
+
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(2);
+      const [firstCall, secondCall] = (mockSupabase.rpc as jest.Mock).mock.calls;
+      expect(firstCall[1].p_idempotency_key).toBe('token-1');
+      expect(secondCall[1].p_idempotency_key).toBe('token-1');
+    });
+
+    it('records a skipped comparison with no winner and no rating change', async () => {
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: null });
+
+      await persistSkippedComparison({
+        rankingId: 'ranking-1',
+        itemAId: 'item-a',
+        itemBId: 'item-b',
+        idempotencyKey: 'token-2',
+      });
+
+      expect(mockSupabase.rpc).toHaveBeenCalledTimes(1);
+      expect(mockSupabase.rpc).toHaveBeenCalledWith('record_comparison', {
+        p_ranking_id: 'ranking-1',
+        p_item_a_id: 'item-a',
+        p_item_b_id: 'item-b',
+        p_winner_item_id: null,
+        p_winner_ranked_item_id: null,
+        p_winner_rating: null,
+        p_winner_comparisons: null,
+        p_loser_ranked_item_id: null,
+        p_loser_rating: null,
+        p_loser_comparisons: null,
+        p_idempotency_key: 'token-2',
+      });
+    });
+
+    it('surfaces an RPC error for a skipped comparison the same way', async () => {
+      const rpcError = { message: 'RLS denied' };
+      (mockSupabase.rpc as jest.Mock).mockResolvedValue({ data: null, error: rpcError });
+
+      await expect(
+        persistSkippedComparison({
+          rankingId: 'ranking-1',
+          itemAId: 'item-a',
+          itemBId: 'item-b',
+          idempotencyKey: 'token-3',
+        })
+      ).rejects.toEqual(rpcError);
+    });
+  });
+
+  describe('generateIdempotencyKey', () => {
+    it('returns a different value on each call', () => {
+      const keys = new Set(Array.from({ length: 20 }, () => generateIdempotencyKey()));
+      expect(keys.size).toBe(20);
     });
   });
 
@@ -1397,6 +1525,100 @@ describe('API Module', () => {
         expect(result).toHaveLength(1);
         expect(result[0].title).toBe('List One');
         expect(result[0].creator_name).toBeUndefined();
+      });
+
+      it('should skip a list and log when its item count query errors', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Broken List', description: 'd1' },
+          },
+          {
+            id: 'f2',
+            list_id: 'list-2',
+            featured_at: '2024-01-02T00:00:00Z',
+            lists: { id: 'list-2', title: 'Fine List', description: 'd2' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        let itemCountCalls = 0;
+        const listItemsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockImplementation(() => {
+            itemCountCalls++;
+            if (itemCountCalls === 1) {
+              return Promise.resolve({ count: null, error: { message: 'RLS denied' } });
+            }
+            return Promise.resolve({ count: 4, error: null });
+          }),
+        };
+        const rankingsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 2, error: null }),
+        };
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return listItemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`unexpected table ${table}`);
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toHaveLength(1);
+        expect(result[0].title).toBe('Fine List');
+        expect(consoleSpy).toHaveBeenCalledWith(
+          'Item count for list list-1 not available:',
+          'RLS denied'
+        );
+        consoleSpy.mockRestore();
+      });
+
+      it('should skip a list and log when its ranking count query errors', async () => {
+        const featured = [
+          {
+            id: 'f1',
+            list_id: 'list-1',
+            featured_at: '2024-01-01T00:00:00Z',
+            lists: { id: 'list-1', title: 'Broken List', description: 'd1' },
+          },
+        ];
+        const featuredChain = {
+          select: jest.fn().mockReturnThis(),
+          order: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockResolvedValue({ data: featured, error: null }),
+        };
+        const listItemsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: 4, error: null }),
+        };
+        const rankingsChain = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockResolvedValue({ count: null, error: { message: 'timeout' } }),
+        };
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+        (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
+          if (table === 'featured_lists') return featuredChain;
+          if (table === 'list_items') return listItemsChain;
+          if (table === 'rankings') return rankingsChain;
+          throw new Error(`unexpected table ${table}`);
+        });
+
+        const result = await getFeaturedLists();
+
+        expect(result).toEqual([]);
+        expect(consoleSpy).toHaveBeenCalledWith(
+          'Ranking count for list list-1 not available:',
+          'timeout'
+        );
+        consoleSpy.mockRestore();
       });
 
       it('should not query profiles when no creator ids are present', async () => {
@@ -1812,17 +2034,12 @@ describe('API Module', () => {
 
     it('should duplicate a list with items', async () => {
       // duplicateList makes these sequential from() calls:
-      // 0: getList         → from('lists').select().eq().single()
+      // 0: getList         → from('lists').select().eq().maybeSingle()
       // 1: getListItems    → from('list_items').select().eq().order()  [terminal]
       // 2: createList      → from('lists').insert().select().single()
       // 3: addListItems order-check → from('list_items').select().eq().order().limit() [terminal]
       // 4: addListItems batch insert → from('list_items').insert().select() [terminal]
       let callIndex = 0;
-      let singleCallIndex = 0;
-      const singleResults = [
-        { data: sourceList, error: null },   // getList
-        { data: copiedList, error: null },   // createList
-      ];
 
       (mockSupabase.from as jest.Mock).mockImplementation(() => {
         const idx = callIndex++;
@@ -1832,11 +2049,8 @@ describe('API Module', () => {
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockResolvedValue({ data: [] }), // no existing items for order check
-          single: jest.fn().mockImplementation(() => {
-            const result = singleResults[singleCallIndex];
-            singleCallIndex++;
-            return Promise.resolve(result);
-          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
+          single: jest.fn().mockResolvedValue({ data: copiedList, error: null }),
         };
         // getListItems (idx 1) uses order() as terminal
         if (idx === 1) {
@@ -1858,11 +2072,6 @@ describe('API Module', () => {
     it('should duplicate an empty list (no items)', async () => {
       // Empty list: getList, getListItems (returns []), createList — no addListItems
       let callIndex = 0;
-      let singleCallIndex = 0;
-      const singleResults = [
-        { data: sourceList, error: null },   // getList
-        { data: copiedList, error: null },   // createList
-      ];
 
       (mockSupabase.from as jest.Mock).mockImplementation(() => {
         const idx = callIndex++;
@@ -1872,11 +2081,8 @@ describe('API Module', () => {
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockResolvedValue({ data: [] }),
-          single: jest.fn().mockImplementation(() => {
-            const result = singleResults[singleCallIndex];
-            singleCallIndex++;
-            return Promise.resolve(result);
-          }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: sourceList, error: null }),
+          single: jest.fn().mockResolvedValue({ data: copiedList, error: null }),
         };
         if (idx === 1) {
           chain.order = jest.fn().mockResolvedValue({ data: [], error: null });
@@ -1893,10 +2099,22 @@ describe('API Module', () => {
       (mockSupabase.from as jest.Mock).mockImplementation(() => ({
         select: jest.fn().mockReturnThis(),
         eq: jest.fn().mockReturnThis(),
-        single: jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } }),
+        maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
       }));
 
       await expect(duplicateList('nonexistent')).rejects.toThrow('Source list not found');
+    });
+
+    it('should surface a failed source lookup rather than "not found"', async () => {
+      // getList used to swallow this and return null, so an RLS denial was
+      // reported to the user as a missing list.
+      (mockSupabase.from as jest.Mock).mockImplementation(() => ({
+        select: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        maybeSingle: jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } }),
+      }));
+
+      await expect(duplicateList('source-list')).rejects.toEqual({ message: 'RLS denied' });
     });
   });
 
@@ -1907,8 +2125,8 @@ describe('API Module', () => {
     describe('getUserRankingForList', () => {
       it('returns the ranking row when one exists', async () => {
         const ranking = { id: 'r1', list_id: 'list-1', user_id: 'user-1', is_complete: false };
-        const single = jest.fn().mockResolvedValue({ data: ranking, error: null });
-        const eq2 = jest.fn().mockReturnValue({ single });
+        const maybeSingle = jest.fn().mockResolvedValue({ data: ranking, error: null });
+        const eq2 = jest.fn().mockReturnValue({ maybeSingle });
         const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
         const select = jest.fn().mockReturnValue({ eq: eq1 });
         (mockSupabase.from as jest.Mock).mockReturnValue({ select });
@@ -1921,21 +2139,31 @@ describe('API Module', () => {
       });
 
       it('returns null when no ranking exists', async () => {
-        const single = jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } });
-        const eq2 = jest.fn().mockReturnValue({ single });
+        const maybeSingle = jest.fn().mockResolvedValue({ data: null, error: null });
+        const eq2 = jest.fn().mockReturnValue({ maybeSingle });
         const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
         const select = jest.fn().mockReturnValue({ eq: eq1 });
         (mockSupabase.from as jest.Mock).mockReturnValue({ select });
 
         expect(await getUserRankingForList('list-1', 'user-1')).toBeNull();
       });
+
+      it('throws when the lookup fails for a real reason', async () => {
+        const maybeSingle = jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } });
+        const eq2 = jest.fn().mockReturnValue({ maybeSingle });
+        const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+        const select = jest.fn().mockReturnValue({ eq: eq1 });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        await expect(getUserRankingForList('list-1', 'user-1')).rejects.toEqual({ message: 'RLS denied' });
+      });
     });
 
     describe('getCompletedRankingForList', () => {
       it('returns the most recent completed ranking', async () => {
         const ranking = { id: 'r1', list_id: 'list-1', is_complete: true };
-        const single = jest.fn().mockResolvedValue({ data: ranking, error: null });
-        const limit = jest.fn().mockReturnValue({ single });
+        const maybeSingle = jest.fn().mockResolvedValue({ data: ranking, error: null });
+        const limit = jest.fn().mockReturnValue({ maybeSingle });
         const order = jest.fn().mockReturnValue({ limit });
         const eq2 = jest.fn().mockReturnValue({ order });
         const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
@@ -1952,8 +2180,8 @@ describe('API Module', () => {
       });
 
       it('returns null when no completed ranking exists', async () => {
-        const single = jest.fn().mockResolvedValue({ data: null, error: { code: 'PGRST116' } });
-        const limit = jest.fn().mockReturnValue({ single });
+        const maybeSingle = jest.fn().mockResolvedValue({ data: null, error: null });
+        const limit = jest.fn().mockReturnValue({ maybeSingle });
         const order = jest.fn().mockReturnValue({ limit });
         const eq2 = jest.fn().mockReturnValue({ order });
         const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
@@ -1961,6 +2189,18 @@ describe('API Module', () => {
         (mockSupabase.from as jest.Mock).mockReturnValue({ select });
 
         expect(await getCompletedRankingForList('list-1')).toBeNull();
+      });
+
+      it('throws when the lookup fails for a real reason', async () => {
+        const maybeSingle = jest.fn().mockResolvedValue({ data: null, error: { message: 'RLS denied' } });
+        const limit = jest.fn().mockReturnValue({ maybeSingle });
+        const order = jest.fn().mockReturnValue({ limit });
+        const eq2 = jest.fn().mockReturnValue({ order });
+        const eq1 = jest.fn().mockReturnValue({ eq: eq2 });
+        const select = jest.fn().mockReturnValue({ eq: eq1 });
+        (mockSupabase.from as jest.Mock).mockReturnValue({ select });
+
+        await expect(getCompletedRankingForList('list-1')).rejects.toEqual({ message: 'RLS denied' });
       });
     });
   });
