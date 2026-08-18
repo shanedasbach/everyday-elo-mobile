@@ -10,6 +10,7 @@ const { defineConfig, globalIgnores } = require('eslint/config');
 const expoConfig = require('eslint-config-expo/flat');
 const eslintConfigPrettier = require('eslint-config-prettier/flat');
 const typescriptEslint = require('@typescript-eslint/eslint-plugin');
+const globals = require('globals');
 
 module.exports = defineConfig([
   ...expoConfig,
@@ -42,6 +43,15 @@ module.exports = defineConfig([
     rules: {
       'import/first': 'off',
       '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+  {
+    // jest.setup.js runs inside the Jest environment, not through the
+    // TypeScript parser that gives .test.ts(x) files ambient @types/jest
+    // globals for free.
+    files: ['jest.setup.js'],
+    languageOptions: {
+      globals: globals.jest,
     },
   },
   globalIgnores([

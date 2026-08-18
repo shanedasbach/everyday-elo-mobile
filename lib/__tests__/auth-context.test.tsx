@@ -20,7 +20,7 @@ import React, { useEffect } from 'react';
 // react-test-renderer ships no type declarations in this project. The shape
 // we use (create/act + the returned renderer's unmount) is stable, so we
 // declare a minimal local typing rather than depending on @types/react-test-renderer.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const TestRenderer = require('react-test-renderer') as {
   create: (element: React.ReactElement) => { unmount: () => void };
   act: (cb: () => void | Promise<void>) => Promise<void> | void;

@@ -324,7 +324,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .eq('list_id', list.id);
 
     if (itemCountError) {
-      console.log(`Item count for list ${list.id} not available:`, itemCountError.message);
+      console.warn(`Item count for list ${list.id} not available:`, itemCountError.message);
       continue;
     }
 
@@ -335,7 +335,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .eq('list_id', list.id);
 
     if (rankingCountError) {
-      console.log(`Ranking count for list ${list.id} not available:`, rankingCountError.message);
+      console.warn(`Ranking count for list ${list.id} not available:`, rankingCountError.message);
       continue;
     }
 

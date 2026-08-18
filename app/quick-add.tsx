@@ -13,7 +13,7 @@ import {
 import { router, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../lib/auth-context';
-import { getUserLists, addListItem, addListItems, getListItems, List, ListItem } from '../lib/api';
+import { getUserLists, addListItem, addListItems, getListItems, List } from '../lib/api';
 import { findDuplicateItemName } from '../lib/duplicate-item-name';
 import BulkAddModal from '../components/BulkAddModal';
 
