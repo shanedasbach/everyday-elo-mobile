@@ -50,12 +50,13 @@ jest.mock('../supabase', () => ({
   supabase: { auth: supabaseAuth },
 }));
 
-const registerForPushNotificationsAsync = jest.fn();
 const removePushToken = jest.fn();
+const getOrCreateDeviceId = jest.fn();
+const clearPersistedPushToken = jest.fn();
 jest.mock('../notifications', () => ({
-  registerForPushNotificationsAsync: (...args: unknown[]) =>
-    registerForPushNotificationsAsync(...args),
   removePushToken: (...args: unknown[]) => removePushToken(...args),
+  getOrCreateDeviceId: (...args: unknown[]) => getOrCreateDeviceId(...args),
+  clearPersistedPushToken: (...args: unknown[]) => clearPersistedPushToken(...args),
 }));
 
 import { AuthProvider, useAuth } from '../auth-context';
@@ -225,24 +226,30 @@ describe('AuthProvider / useAuth', () => {
   });
 
   describe('signOut', () => {
-    it('removes the device push token and signs out', async () => {
-      registerForPushNotificationsAsync.mockResolvedValue('ExponentPushToken[abc]');
-      removePushToken.mockResolvedValue(undefined);
+    beforeEach(() => {
       supabaseAuth.signOut.mockResolvedValue({ error: null });
+      getOrCreateDeviceId.mockResolvedValue('device-1');
+      removePushToken.mockResolvedValue(undefined);
+      clearPersistedPushToken.mockResolvedValue(undefined);
+    });
+
+    it('removes this device row for the signed-in user and clears the local cache', async () => {
+      const user = { id: 'user-1', email: 'a@b.co' };
+      const session = { access_token: 't', user };
+      supabaseAuth.getSession.mockResolvedValue({ data: { session } });
       const { getCtx } = await renderProvider();
 
       await act(async () => {
         await getCtx().signOut();
       });
 
-      expect(registerForPushNotificationsAsync).toHaveBeenCalled();
-      expect(removePushToken).toHaveBeenCalledWith('ExponentPushToken[abc]');
+      expect(getOrCreateDeviceId).toHaveBeenCalled();
+      expect(removePushToken).toHaveBeenCalledWith('user-1', 'device-1');
+      expect(clearPersistedPushToken).toHaveBeenCalled();
       expect(supabaseAuth.signOut).toHaveBeenCalled();
     });
 
-    it('skips push token removal when no token is available', async () => {
-      registerForPushNotificationsAsync.mockResolvedValue(null);
-      supabaseAuth.signOut.mockResolvedValue({ error: null });
+    it('does not call removePushToken when there is no signed-in user', async () => {
       const { getCtx } = await renderProvider();
 
       await act(async () => {
@@ -250,40 +257,40 @@ describe('AuthProvider / useAuth', () => {
       });
 
       expect(removePushToken).not.toHaveBeenCalled();
+      expect(clearPersistedPushToken).toHaveBeenCalled();
       expect(supabaseAuth.signOut).toHaveBeenCalled();
     });
 
-    it('still signs out when push token cleanup throws', async () => {
-      registerForPushNotificationsAsync.mockRejectedValue(new Error('push broke'));
-      supabaseAuth.signOut.mockResolvedValue({ error: null });
-      const { getCtx } = await renderProvider();
+    it('logs and still signs out when revocation throws', async () => {
+      const user = { id: 'user-1', email: 'a@b.co' };
+      const session = { access_token: 't', user };
+      supabaseAuth.getSession.mockResolvedValue({ data: { session } });
+      const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      getOrCreateDeviceId.mockRejectedValue(new Error('offline'));
 
+      const { getCtx } = await renderProvider();
       await act(async () => {
         await getCtx().signOut();
       });
 
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to revoke push token on sign-out:',
+        expect.any(Error)
+      );
       expect(supabaseAuth.signOut).toHaveBeenCalled();
-    });
 
-    it('still signs out when removePushToken throws', async () => {
-      registerForPushNotificationsAsync.mockResolvedValue('tok');
-      removePushToken.mockRejectedValue(new Error('delete failed'));
-      supabaseAuth.signOut.mockResolvedValue({ error: null });
-      const { getCtx } = await renderProvider();
-
-      await act(async () => {
-        await getCtx().signOut();
-      });
-
-      expect(supabaseAuth.signOut).toHaveBeenCalled();
+      consoleErrorSpy.mockRestore();
     });
 
     it('throws when supabase.auth.signOut returns an error', async () => {
-      registerForPushNotificationsAsync.mockResolvedValue(null);
       supabaseAuth.signOut.mockResolvedValue({ error: new Error('network') });
       const { getCtx } = await renderProvider();
 
-      await expect(getCtx().signOut()).rejects.toThrow('network');
+      await expect(
+        act(async () => {
+          await getCtx().signOut();
+        })
+      ).rejects.toThrow('network');
     });
   });
 

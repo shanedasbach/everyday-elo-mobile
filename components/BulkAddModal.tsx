@@ -11,6 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import { findDuplicateItemName, hasDuplicateWithinBatch } from '../lib/duplicate-item-name';
 
 interface BulkAddModalProps {
   visible: boolean;
@@ -39,11 +40,7 @@ export default function BulkAddModal({ visible, onClose, onAdd, existingItems }:
     }
 
     // Check for duplicates with existing items
-    const duplicates = items.filter(item => 
-      existingItems.some(existing => 
-        existing.toLowerCase() === item.toLowerCase()
-      )
-    );
+    const duplicates = items.filter(item => findDuplicateItemName(item, existingItems));
 
     if (duplicates.length > 0) {
       setError(`Already exists: ${duplicates.slice(0, 3).join(', ')}${duplicates.length > 3 ? '...' : ''}`);
@@ -51,8 +48,7 @@ export default function BulkAddModal({ visible, onClose, onAdd, existingItems }:
     }
 
     // Check for duplicates within the input
-    const uniqueItems = [...new Set(items.map(i => i.toLowerCase()))];
-    if (uniqueItems.length !== items.length) {
+    if (hasDuplicateWithinBatch(items)) {
       setError('Some items are duplicated');
       return;
     }
@@ -87,11 +83,20 @@ export default function BulkAddModal({ visible, onClose, onAdd, existingItems }:
         
         <View style={styles.sheet}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={handleClose}>
+            <TouchableOpacity
+              onPress={handleClose}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel"
+            >
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
             <Text style={styles.title}>Bulk Add Items</Text>
-            <TouchableOpacity onPress={handleAdd}>
+            <TouchableOpacity
+              onPress={handleAdd}
+              accessibilityRole="button"
+              accessibilityLabel={itemCount > 0 ? `Add ${itemCount} items` : 'Add items'}
+              accessibilityState={{ disabled: itemCount === 0 }}
+            >
               <Text style={[styles.addText, itemCount === 0 && styles.addTextDisabled]}>
                 Add{itemCount > 0 ? ` (${itemCount})` : ''}
               </Text>
