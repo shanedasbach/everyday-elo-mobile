@@ -43,3 +43,8 @@ coverage/
 
 # Claude Code ephemeral
 .claude/worktrees/
+
+# EAS submit credentials (never commit)
+play-store-service-account.json
+google-services.json
+GoogleService-Info.plist

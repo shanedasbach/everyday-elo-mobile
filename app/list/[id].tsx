@@ -16,18 +16,20 @@ import { useAuth } from '../../lib/auth-context';
 import ListActionSheet, { ActionItem } from '../../components/ListActionSheet';
 import AddItemModal from '../../components/AddItemModal';
 import BulkAddModal from '../../components/BulkAddModal';
+import FollowButton from '../../components/FollowButton';
 import {
   getList,
   getListByShareCode,
   getListItems,
   getRankedItems,
+  getUserRankingForList,
   deleteList,
   addListItem,
+  addListItems,
   duplicateList,
   List,
   ListItem,
 } from '../../lib/api';
-import { supabase } from '../../lib/supabase';
 
 interface RankedListItem extends ListItem {
   rating?: number;
@@ -70,12 +72,7 @@ export default function ListDetailScreen() {
       
       // Check if user has ranked this list
       if (user) {
-        const { data: ranking } = await supabase
-          .from('rankings')
-          .select('*')
-          .eq('list_id', listData.id)
-          .eq('user_id', user.id)
-          .single();
+        const ranking = await getUserRankingForList(listData.id, user.id);
 
         if (ranking) {
           setRankingStatus(ranking.is_complete ? 'completed' : 'in_progress');
@@ -196,14 +193,10 @@ export default function ListDetailScreen() {
 
   const handleBulkAdd = async (names: string[]) => {
     if (!list) return;
-    
+
     try {
-      const newItems: RankedListItem[] = [];
-      for (const name of names) {
-        const newItem = await addListItem(list.id, name);
-        newItems.push({ ...newItem, rank: undefined, rating: undefined });
-      }
-      setItems([...items, ...newItems]);
+      const newItems = await addListItems(list.id, names);
+      setItems([...items, ...newItems.map(item => ({ ...item, rank: undefined, rating: undefined }))]);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
       console.error('Failed to add items:', error);
@@ -298,8 +291,13 @@ export default function ListDetailScreen() {
           {list.description && (
             <Text style={styles.listDescription}>{list.description}</Text>
           )}
-          
-          <Text style={styles.itemCount}>{items.length} items</Text>
+
+          <View style={styles.listMetaRow}>
+            <Text style={styles.itemCount}>{items.length} items</Text>
+            {user && !isOwner && list.creator_id && (
+              <FollowButton currentUserId={user.id} targetUserId={list.creator_id} />
+            )}
+          </View>
         </View>
 
         <View style={styles.itemsSection}>
@@ -476,6 +474,11 @@ const styles = StyleSheet.create({
   itemCount: {
     fontSize: 13,
     color: '#9CA3AF',
+  },
+  listMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   itemsSection: {
     backgroundColor: '#fff',

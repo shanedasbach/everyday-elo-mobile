@@ -11,7 +11,7 @@ npm test:coverage    # Coverage report (95% threshold globally)
 ```
 
 ## Architecture
-- **Expo SDK 54** with React Native 0.81 and React 19
+- **Expo SDK 57** with React Native 0.86 and React 19
 - **Expo Router** file-based navigation with typed routes
 - **Tab navigation**: browse, create, my-lists, profile
 - **Screens**: list/[id] detail, rank/[id] comparison, quick-add modal, (auth) sign-in/sign-up
@@ -22,14 +22,19 @@ npm test:coverage    # Coverage report (95% threshold globally)
 - **Platform**: iOS (com.everydayelo.app), Android (com.everydayelo.app)
 
 ## Testing
-- Jest with jest-expo and ts-jest transform
+- Jest with `testEnvironment: 'node'` and ts-jest transform — no `jest-expo` or
+  `@testing-library/react-native`, both confirmed unusable on this Jest 30 /
+  Expo SDK 54 stack (see `components/__tests__/helpers/README.md`)
+- Component tests render against host stubs in `components/__tests__/helpers/`
+  (`rnMock.tsx`, `render.tsx`) via `react-test-renderer`
 - 95% coverage threshold on branches, functions, lines, and statements
 - Currently 100% coverage on lib modules (104 tests)
-- Test pattern: `lib/__tests__/**/*.test.ts`
+- Test pattern: `**/__tests__/**/*.test.ts(x)` — any `__tests__` directory, including `app/` and `components/`
 
 ## Key Files
 - `lib/api.ts` — Supabase API client for all data operations
 - `lib/elo.ts` — Elo rating algorithm (shared with web)
+- `lib/pair-selection.ts` — next-pair strategy, shared by `selectNextPair` and the rank screen
 - `lib/auth-context.tsx` — Auth state management with SecureStore
 - `lib/supabase.ts` — Supabase client configuration
 - `lib/templates.ts` — Template data
