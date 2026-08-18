@@ -87,6 +87,10 @@ export default function RankScreen() {
   const lastTranslationB = useRef(0);
   const isAnimatingOut = useRef(false);
 
+  // Guards handleChoice against a rapid double-tap/double-swipe firing two
+  // persists for the same comparison before the first one resolves.
+  const isProcessingChoice = useRef(false);
+
   useEffect(() => {
     loadList();
   }, [id]);
@@ -227,8 +231,18 @@ export default function RankScreen() {
   };
 
   const handleChoice = async (winnerIdx: number, loserIdx: number) => {
+    if (isProcessingChoice.current) return;
+    isProcessingChoice.current = true;
+    try {
+      await handleChoiceInner(winnerIdx, loserIdx);
+    } finally {
+      isProcessingChoice.current = false;
+    }
+  };
+
+  const handleChoiceInner = async (winnerIdx: number, loserIdx: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    
+
     const winner = rankedItems[winnerIdx];
     const loser = rankedItems[loserIdx];
 

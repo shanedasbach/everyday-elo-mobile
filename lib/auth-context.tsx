@@ -1,13 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
-import {
-  registerForPushNotificationsAsync,
-  removePushToken,
-  getPersistedPushToken,
-  clearPersistedPushToken,
-  hasNotificationPermission,
-} from './notifications';
+import { removePushToken, getOrCreateDeviceId, clearPersistedPushToken } from './notifications';
 
 interface AuthContextType {
   user: User | null;
@@ -53,24 +47,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
-    // Best-effort: unregister this device's push token so the backend stops
-    // targeting it after sign-out. Failures here must not block sign-out.
-    // Prefer the token persisted when it was first registered — re-deriving
-    // it via registerForPushNotificationsAsync() means a fresh permission
-    // check and a network round-trip to Expo's push service, which silently
-    // drops the revocation if the device is offline. Only fall back to
-    // re-deriving when permission is already granted — otherwise there's no
-    // token to revoke, and registering would surface a native permission
-    // prompt in the middle of signing out (#94).
+    // Best-effort: unregister this device's push-token row so the backend
+    // stops targeting it after sign-out. Failures here must not block
+    // sign-out — if this silently fails (offline, dropped error), the next
+    // sign-in on this device reconciles ownership anyway (see
+    // reconcileDeviceOwnership in lib/notifications.ts, #96). This also
+    // means signOut() never calls registerForPushNotificationsAsync(), so it
+    // can't trigger a native permission prompt (#94).
     try {
-      let token = await getPersistedPushToken();
-      if (!token && (await hasNotificationPermission())) {
-        token = await registerForPushNotificationsAsync();
+      if (user) {
+        const deviceId = await getOrCreateDeviceId();
+        await removePushToken(user.id, deviceId);
       }
-      if (token) {
-        await removePushToken(token);
-        await clearPersistedPushToken();
-      }
+      await clearPersistedPushToken();
     } catch (error) {
       // Non-fatal — proceed with sign-out regardless, but keep this visible.
       console.error('Failed to revoke push token on sign-out:', error);

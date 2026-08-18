@@ -13,7 +13,7 @@ import {
 import { router, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../lib/auth-context';
-import { getUserLists, addListItem, getListItems, List, ListItem } from '../lib/api';
+import { getUserLists, addListItem, addListItems, getListItems, List, ListItem } from '../lib/api';
 import { findDuplicateItemName } from '../lib/duplicate-item-name';
 import BulkAddModal from '../components/BulkAddModal';
 
@@ -94,11 +94,9 @@ export default function QuickAddScreen() {
 
     setAdding(true);
     try {
-      for (const name of names) {
-        await addListItem(selectedList.id, name);
-      }
+      const newItems = await addListItems(selectedList.id, names);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setAddedItems([...addedItems, ...names]);
+      setAddedItems([...addedItems, ...newItems.map(item => item.name)]);
     } catch (error) {
       console.error('Failed to add items:', error);
       Alert.alert('Error', 'Failed to add some items');

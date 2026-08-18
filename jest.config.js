@@ -30,6 +30,8 @@ module.exports = {
     'lib/swipe-gesture.ts',
     'lib/follow-state.ts',
     'lib/notifications.ts',
+    'lib/auth-context.tsx',
+    'lib/supabase.ts',
     'lib/supabase-config.ts',
     'lib/pair-selection.ts',
     'lib/duplicate-item-name.ts',

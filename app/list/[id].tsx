@@ -25,6 +25,7 @@ import {
   getUserRankingForList,
   deleteList,
   addListItem,
+  addListItems,
   duplicateList,
   List,
   ListItem,
@@ -192,14 +193,10 @@ export default function ListDetailScreen() {
 
   const handleBulkAdd = async (names: string[]) => {
     if (!list) return;
-    
+
     try {
-      const newItems: RankedListItem[] = [];
-      for (const name of names) {
-        const newItem = await addListItem(list.id, name);
-        newItems.push({ ...newItem, rank: undefined, rating: undefined });
-      }
-      setItems([...items, ...newItems]);
+      const newItems = await addListItems(list.id, names);
+      setItems([...items, ...newItems.map(item => ({ ...item, rank: undefined, rating: undefined }))]);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
       console.error('Failed to add items:', error);
