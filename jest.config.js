@@ -42,6 +42,7 @@ module.exports = {
     'components/ItemActionMenu.tsx',
     'components/ListActionSheet.tsx',
     'components/FollowButton.tsx',
+    'components/RootErrorBoundary.tsx',
   ],
   coverageThreshold: {
     global: {

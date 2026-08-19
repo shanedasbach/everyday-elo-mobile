@@ -51,7 +51,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // stops targeting it after sign-out. Failures here must not block
     // sign-out — if this silently fails (offline, dropped error), the next
     // sign-in on this device reconciles ownership anyway (see
-    // reconcileDeviceOwnership in lib/notifications.ts, #96).
+    // reconcileDeviceOwnership in lib/notifications.ts, #96). This also
+    // means signOut() never calls registerForPushNotificationsAsync(), so it
+    // can't trigger a native permission prompt (#94).
     try {
       if (user) {
         const deviceId = await getOrCreateDeviceId();
