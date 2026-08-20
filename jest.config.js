@@ -30,6 +30,8 @@ module.exports = {
     'lib/swipe-gesture.ts',
     'lib/follow-state.ts',
     'lib/notifications.ts',
+    'lib/auth-context.tsx',
+    'lib/supabase.ts',
     'lib/supabase-config.ts',
     'lib/pair-selection.ts',
     'lib/duplicate-item-name.ts',
@@ -40,6 +42,7 @@ module.exports = {
     'components/ItemActionMenu.tsx',
     'components/ListActionSheet.tsx',
     'components/FollowButton.tsx',
+    'components/RootErrorBoundary.tsx',
   ],
   coverageThreshold: {
     global: {

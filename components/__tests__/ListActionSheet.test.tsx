@@ -71,7 +71,7 @@ describe('ListActionSheet', () => {
     const deleteLabel = (root.findAllByType(RN.Text) as TextNode[]).find(
       (node) => node.props.children === 'Delete',
     );
-    const styles = deleteLabel?.props.style as Array<{ color?: string }>;
+    const styles = deleteLabel?.props.style as { color?: string }[];
     expect(styles.some((s) => s && s.color === '#EF4444')).toBe(true);
   });
 
