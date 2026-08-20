@@ -42,6 +42,7 @@ module.exports = {
     'components/ItemActionMenu.tsx',
     'components/ListActionSheet.tsx',
     'components/FollowButton.tsx',
+    'components/RootErrorBoundary.tsx',
     // Screens gain smoke-render coverage per issue #66; listed individually
     // for the same reason as the components above — joining the gate is a
     // deliberate per-file step, not a blanket `app/**/*.tsx` glob.
