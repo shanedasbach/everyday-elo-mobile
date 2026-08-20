@@ -7,7 +7,6 @@ import {
   getFollowedListsFeed,
   FeaturedList,
   FollowedListFeedEntry,
-  List,
 } from '../../lib/api';
 import { templates as fallbackTemplates, Template } from '../../lib/templates';
 import { useAuth } from '../../lib/auth-context';
@@ -47,7 +46,7 @@ export default function BrowseScreen() {
       const featured = await getFeaturedLists();
       setFeaturedLists(featured);
     } catch (error) {
-      console.log('Using offline data');
+      console.warn('Using offline data', error);
     } finally {
       setLoading(false);
       setRefreshing(false);

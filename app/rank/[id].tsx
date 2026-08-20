@@ -34,9 +34,6 @@ import {
   generateIdempotencyKey,
   addListItem,
   deleteListItem,
-  List,
-  ListItem,
-  RankedItem,
 } from '../../lib/api';
 import { getTemplateById } from '../../lib/templates';
 import {
@@ -93,6 +90,10 @@ export default function RankScreen() {
 
   useEffect(() => {
     loadList();
+    // `loadList` is redeclared every render and resets seenPairs plus six pieces
+    // of state, so depending on it would reload the ranking on every render.
+    // The route param is the only thing that should trigger a reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const loadList = async () => {
@@ -424,7 +425,7 @@ export default function RankScreen() {
     if (!selectedItem || useOfflineMode) return;
 
     const sorted = [...rankedItems].sort((a, b) => b.rating - a.rating);
-    const { item, rank } = selectedItem;
+    const { item } = selectedItem;
 
     try {
       if (action === 'boost') {
@@ -812,7 +813,7 @@ export default function RankScreen() {
         accessibilityRole="button"
         accessibilityLabel="Skip this comparison"
       >
-        <Text style={styles.skipText}>Can't decide? Skip this one</Text>
+        <Text style={styles.skipText}>Can&apos;t decide? Skip this one</Text>
       </TouchableOpacity>
     </SafeAreaView>
   );

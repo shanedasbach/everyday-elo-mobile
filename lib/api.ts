@@ -305,7 +305,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
     .limit(20);
 
   if (error) {
-    console.log('Featured lists not available:', error.message);
+    console.warn('Featured lists not available:', error.message);
     return [];
   }
 
@@ -324,7 +324,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .eq('list_id', list.id);
 
     if (itemCountError) {
-      console.log(`Item count for list ${list.id} not available:`, itemCountError.message);
+      console.warn(`Item count for list ${list.id} not available:`, itemCountError.message);
       continue;
     }
 
@@ -335,7 +335,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .eq('list_id', list.id);
 
     if (rankingCountError) {
-      console.log(`Ranking count for list ${list.id} not available:`, rankingCountError.message);
+      console.warn(`Ranking count for list ${list.id} not available:`, rankingCountError.message);
       continue;
     }
 
@@ -364,7 +364,7 @@ export async function getFeaturedLists(): Promise<FeaturedList[]> {
       .in('id', creatorIds);
 
     if (profilesError) {
-      console.log('Creator names not available:', profilesError.message);
+      console.warn('Creator names not available:', profilesError.message);
     } else {
       const nameById = new Map<string, string>();
       for (const profile of profiles || []) {

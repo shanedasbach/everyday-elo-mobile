@@ -726,13 +726,13 @@ describe('API Module', () => {
           { id: 'item-2', display_order: 1 },
         ];
 
-        let orderCalls = 0;
+        let _orderCalls = 0;
         const chain = {
           select: jest.fn().mockReturnThis(),
           insert: jest.fn().mockReturnThis(),
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockImplementation(() => {
-            orderCalls++;
+            _orderCalls++;
             return Promise.resolve({ data: listItems, error: null });
           }),
           // The existing-ranking probe is .maybeSingle(); the insert's
@@ -1562,7 +1562,7 @@ describe('API Module', () => {
           select: jest.fn().mockReturnThis(),
           eq: jest.fn().mockResolvedValue({ count: 2, error: null }),
         };
-        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
         (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
           if (table === 'featured_lists') return featuredChain;
           if (table === 'list_items') return listItemsChain;
@@ -1603,7 +1603,7 @@ describe('API Module', () => {
           select: jest.fn().mockReturnThis(),
           eq: jest.fn().mockResolvedValue({ count: null, error: { message: 'timeout' } }),
         };
-        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
         (mockSupabase.from as jest.Mock).mockImplementation((table: string) => {
           if (table === 'featured_lists') return featuredChain;
           if (table === 'list_items') return listItemsChain;
