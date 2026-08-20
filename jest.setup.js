@@ -11,8 +11,8 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 //
 // Scoped two ways on purpose. It only installs for suites that actually
 // render via react-test-renderer — matched by file extension, since any
-// __tests__/*.tsx file may render a component or provider tree (not just
-// components/__tests__/ — lib/__tests__/auth-context.test.tsx does too) —
+// __tests__/*.tsx file may render a component or provider tree (components/
+// and app/screen __tests__ alike, plus lib/__tests__/auth-context.test.tsx) —
 // and it is always restored in afterAll, so the patch cannot outlive the
 // file that needs it or surprise anyone who later spies on console.error.
 const isRenderSuite = /[\\/]__tests__[\\/][^\\/]+\.tsx$/.test(
@@ -45,6 +45,7 @@ if (isRenderSuite) {
 jest.mock('expo-haptics', () => ({
   notificationAsync: jest.fn(),
   impactAsync: jest.fn(),
+  selectionAsync: jest.fn(),
   NotificationFeedbackType: {
     Success: 'success',
     Warning: 'warning',
