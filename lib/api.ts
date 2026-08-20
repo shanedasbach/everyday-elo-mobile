@@ -1,3 +1,5 @@
+import type { PostgrestError } from '@supabase/supabase-js';
+import * as Crypto from 'expo-crypto';
 import { supabase } from './supabase';
 import { clearPartialRanking } from './partial-ranking';
 import { estimateComparisonsNeeded } from './elo';
@@ -100,9 +102,53 @@ export interface FollowedListsFeed {
   entries: FollowedListFeedEntry[];
 }
 
-// Generate random ID
+// Generate random ID (used for non-public identifiers like anonymous session_id)
 function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
+
+// Crockford-style base32 alphabet (no I/L/O/U — visually unambiguous and URL-safe).
+const SHARE_CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const SHARE_CODE_LENGTH = 8;
+
+/**
+ * Generate a cryptographically random 8-character share code. 5 random bytes
+ * (40 bits) → 8 base32 characters, well above brute-force range.
+ */
+export function generateShareCode(): string {
+  const bytes = Crypto.getRandomBytes(5);
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += SHARE_CODE_ALPHABET[(value >>> bits) & 0x1f];
+    }
+  }
+  return out.slice(0, SHARE_CODE_LENGTH);
+}
+
+const SHARE_CODE_MAX_ATTEMPTS = 3;
+// Postgres unique_violation; surfaced by PostgREST via the `code` field.
+const PG_UNIQUE_VIOLATION = '23505';
+
+/**
+ * True only for a unique-violation on `lists.share_code`.
+ *
+ * Retrying is only ever the right response to a share-code collision: a
+ * different unique constraint on `lists` would fail identically on every
+ * attempt, so a bare `code === '23505'` check would burn all three inserts
+ * before surfacing the same error. Postgres names the column in both fields —
+ * `message` carries the constraint (`lists_share_code_key`) and `details`
+ * carries `Key (share_code)=(…) already exists.` — so matching either is
+ * enough, and matching both tolerates a renamed constraint.
+ */
+function isShareCodeCollision(error: PostgrestError): boolean {
+  if (error.code !== PG_UNIQUE_VIOLATION) return false;
+  return `${error.message ?? ''} ${error.details ?? ''}`.includes('share_code');
 }
 
 /**
@@ -160,23 +206,28 @@ export async function createList(data: {
     );
   }
 
-  const { data: list, error } = await supabase
-    .from('lists')
-    .insert({
-      title: data.title,
-      description: data.description,
-      comparison_prompt: data.comparison_prompt,
-      // Explicitly null rather than undefined, so an unowned list is a stated
-      // intent in the payload instead of an omitted column.
-      creator_id: userId,
-      is_private: data.is_private || false,
-      share_code: generateId().slice(0, 8),
-    })
-    .select()
-    .single();
+  let lastError: PostgrestError | null = null;
+  for (let attempt = 0; attempt < SHARE_CODE_MAX_ATTEMPTS; attempt++) {
+    const { data: list, error } = await supabase
+      .from('lists')
+      .insert({
+        title: data.title,
+        description: data.description,
+        comparison_prompt: data.comparison_prompt,
+        // Explicitly null rather than undefined, so an unowned list is a stated
+        // intent in the payload instead of an omitted column.
+        creator_id: userId,
+        is_private: data.is_private || false,
+        share_code: generateShareCode(),
+      })
+      .select()
+      .single();
 
-  if (error) throw error;
-  return list;
+    if (!error) return list;
+    lastError = error;
+    if (!isShareCodeCollision(error)) throw error;
+  }
+  throw lastError;
 }
 
 export async function getList(id: string): Promise<List | null> {
